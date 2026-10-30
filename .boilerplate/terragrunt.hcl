@@ -21,6 +21,7 @@ locals {
   )
   {{- else }}
   local_vars  = yamldecode(file("./inputs.yaml"))
+  env_vars    = yamldecode(file(find_in_parent_folders("env-inputs.yaml")))
   global_vars = yamldecode(file(find_in_parent_folders("global-inputs.yaml")))
   global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
   local_tags  = jsondecode(file("./local-tags.json"))
@@ -61,7 +62,7 @@ inputs = {
 
   ## Optional
   {{- range .optionalVariables }}
-  {{- if ne .Name "extra_tags" "is_hub" "spoke_def" "org" }}
+  {{- if and (ne .Name "extra_tags") (ne .Name "is_hub") (ne .Name "spoke_def") (ne .Name "org") }}
   {{ .Name }} = try(local.local_vars.{{ .Name }}, {{ .DefaultValue }})
   {{- end }}
   {{- end }}
