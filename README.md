@@ -3,17 +3,21 @@
   ** 
   ** This file was automatically generated. 
   ** 1) Make all changes to `README.yaml` 
-  ** 2) Run `make init` (you only need to do this once)
-  ** 3) Run`make readme` to rebuild this file. 
+  ** 2) Run `tronador readme build` to rebuild this file.
   -->
 [![README Header][readme_header_img]][readme_header_link]
 
 [![cloudopsworks][logo]](https://cloudopsworks.co/)
 
-# Terraform Transit Gateway Module
+# Terraform AWS CloudWatch Observability Setup Module
+
+ [![Latest Release](https://img.shields.io/github/release/cloudopsworks/terraform-module-aws-observability-setup.svg?style=for-the-badge)](https://github.com/cloudopsworks/terraform-module-aws-observability-setup/releases/latest) [![Last Updated](https://img.shields.io/github/last-commit/cloudopsworks/terraform-module-aws-observability-setup.svg?style=for-the-badge)](https://github.com/cloudopsworks/terraform-module-aws-observability-setup/commits)
 
 
-VPC Module for setting up transit gateway with ResourceAccessMananger support.
+Configure opt-in account/Region CloudWatch observability settings with the
+HashiCorp AWS and AWS Cloud Control (AWSCC) Terraform providers. The module
+covers Application Signals, X-Ray Transaction Search and trace controls,
+Observability Admin account telemetry, and CloudWatch Logs account policies.
 
 
 ---
@@ -41,10 +45,261 @@ We have [*lots of terraform modules*][terraform_modules] that are Open Source an
 
 
 
+## Introduction
+
+This module manages **account/Region settings**, not workload instrumentation.
+The optional `cloudwatch` input defaults to `{}` and creates no account-setting
+resources. Deploy at most one instance of this module per AWS account and
+Region (preferably in a shared or hub stack). Enable only settings this
+Terraform state should own. Inventory and import existing singleton settings
+before enabling them; two states must not own one setting. CloudWatch Logs
+resource/account policies and X-Ray encryption use create-or-update APIs,
+so applying a duplicate owner can overwrite existing settings instead of
+failing safely.
+
+| Capability | Terraform ownership | Input |
+| --- | --- | --- |
+| Application Signals discovery and grouping | `awscc_applicationsignals_discovery`, `awscc_applicationsignals_grouping_configuration` | `cloudwatch.application_signals` |
+| X-Ray Transaction Search | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.transaction_search` |
+| X-Ray trace encryption, groups, sampling | `aws_xray_encryption_config`, `aws_xray_group`, `aws_xray_sampling_rule` | `cloudwatch.xray` |
+| Account telemetry inventory and tag enrichment | `aws_observabilityadmin_telemetry_evaluation`, `aws_observabilityadmin_telemetry_enrichment` | `cloudwatch.telemetry` |
+| CloudWatch Logs account policies | `aws_cloudwatch_log_account_policy` | `cloudwatch.log_account_policies` |
+
+AWSCC owns Transaction Search indexing/destination. **Do not also manage**
+`aws_xray_indexing_rule` or `aws_xray_trace_segment_destination` in the same
+account/Region. X-Ray sampling is separate from indexing. The module creates
+the scoped Logs resource policy for `aws/spans` and
+`/aws/application-signals/data` before Transaction Search. The
+`indexing_percentage` input is **0–100 percent**, not a fraction. See
+[AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search-Cloudformation.html)
+and [the configuration reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-xray-transactionsearchconfig.html).
+
+Application Signals discovery enables account integration; it does not install
+collectors or instrument workloads. Grouping owns one whole-account
+configuration. Existing discovery requires import, not blind recreation;
+older discovery may require a separate Application Map migration. See
+[Application Signals discovery](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-applicationsignals-discovery.html).
+
+**Prerequisites and limits**
+
+- Terraform `>= 1.3`, AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.58.0, < 2.0.0`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
+- Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Some settings create service-linked roles.
+- Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
+- X-Ray `encryption` configures traces, **not** the CloudWatch Logs `aws/spans` group. Destroying `aws_xray_encryption_config` does not reset the service setting: apply `type: NONE` before removing the input if you intend to revert KMS encryption. This module does not expose the AWSCC Transaction Search create-only KMS setting; changing it requires a deliberate migration. See [X-Ray encryption config](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_encryption_config).
+- Logs account-policy JSON and selection criteria are type-specific; `scope` currently accepts only `ALL`. The [current Logs API](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutAccountPolicy.html) lists `METRIC_EXTRACTION_POLICY` in addition to the four types in the [AWS provider v6.71 documentation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/r/cloudwatch_log_account_policy.html.markdown), so verify provider support before using that newer type. A subscription-filter policy can export account-wide logs; a data-protection policy can incur per-GB scanning charges. A metric-extraction policy can suppress Application Signals metrics if it includes `/aws/application-signals/data`.
+- Transaction Search includes indexing of 1% of ingested spans, but span ingestion is still billed; indexing above 1% can add cost. See [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html) and [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/). Enabling enrichment or other logging can also incur charges.
+
+Workload instrumentation, dashboards, alarms, OAM links, and organization-wide
+telemetry rules are separate deployments, not features of this module.
+
+## Usage
 
 
+**IMPORTANT:** The `master` branch is used in `source` just as an example. In your code, do not pin to `master` because there may be breaking changes between releases.
+Instead pin to the release tag (e.g. `?ref=vX.Y.Z`) of one of our [latest releases](https://github.com/cloudopsworks/terraform-module-aws-observability-setup/releases).
 
 
+Begin with the [Terragrunt scaffold](https://docs.terragrunt.com/reference/cli/commands/scaffold).
+Create and enter the target directory first; scaffold writes `terragrunt.hcl`,
+`inputs.yaml`, and `local-tags.json` into the current directory.
+
+```sh
+mkdir -p dev/us-east-1/shared/cloudwatch-observability
+cd dev/us-east-1/shared/cloudwatch-observability
+terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-observability-setup
+vi inputs.yaml
+# Ensure the parent root.hcl configures both providers as shown below.
+terragrunt plan
+terragrunt apply
+```
+
+Scaffold resolves the latest release tag into a pinned `terraform.source`.
+Use a release (or tested pre-release) tag that contains these scaffold fixes;
+older published tags may still contain the prior template errors. Before
+applying, configure both providers in the parent Terragrunt `root.hcl` with
+the same Region, source profile, and target role. For example, set
+`AWS_REGION`, `AWS_PROFILE`, and `OBSERVABILITY_ROLE_ARN` and use:
+
+```hcl
+generate "observability_providers" {
+  path      = "observability-providers.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<-EOF
+provider "aws" {
+  region  = "${get_env("AWS_REGION")}"
+  profile = "${get_env("AWS_PROFILE")}"
+  assume_role {
+    role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
+  }
+}
+
+provider "awscc" {
+  region  = "${get_env("AWS_REGION")}"
+  profile = "${get_env("AWS_PROFILE")}"
+  assume_role = {
+    role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
+  }
+}
+EOF
+}
+```
+
+The AWS provider uses an `assume_role` block; AWSCC uses an
+`assume_role` object. See the [AWS provider](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/index.html.markdown)
+and [AWSCC provider](https://github.com/hashicorp/terraform-provider-awscc/blob/v1.108.0/docs/index.md)
+configuration references. If your root stack already generates providers,
+add AWSCC to that generator instead of creating a second provider file.
+
+The Terragrunt hierarchy must provide `root.hcl`, `env-inputs.yaml`,
+`global-inputs.yaml`, and `global-tags.json` in parent directories. The
+scaffold creates `local-tags.json`. The `shared` directory is the single
+logical owner for this account/Region, not an AWS isolation boundary. Choose
+non-hub scaffold mode for the example below. Review the plan before changing
+account-wide settings.
+
+The generated `inputs.yaml` contains this module-specific key and annotated
+option tree as comments. There is only one `cloudwatch` key in the generated
+file, commented out by default, so the module uses its safe `{}` default.
+Uncomment that key and replace the empty object only for settings this state
+will own; the nested lines are illustrative comments, not a second key.
+
+```yaml
+#cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
+#   application_signals: # (Optional) Discovery/grouping settings; default {}.
+#     enabled: true # (Optional) Default false.
+#     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
+#       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
+#         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
+#         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
+#   transaction_search: # (Optional) X-Ray Transaction Search; default null.
+#     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+#     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+#   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
+#     encryption: # (Optional) Trace encryption; default null.
+#       type: "KMS" # (Required) NONE or KMS.
+#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Required for KMS; default null.
+#     groups: # (Optional) Map keyed by group name; default {}.
+#       checkout: # (Optional) Example group.
+#         filter_expression: 'service("checkout")' # (Required) X-Ray filter expression.
+#         insights_enabled: true # (Optional) Default false.
+#         notifications_enabled: false # (Optional) Default false.
+#     sampling_rules: # (Optional) Map keyed by rule name; default {}.
+#       checkout: # (Optional) Example rule.
+#         fixed_rate: 0.1 # (Required) Fraction, 0-1.
+#         priority: 100 # (Required) 1-9999.
+#         reservoir_size: 1 # (Required) Nonnegative integer.
+#         host: "*" # (Optional) Default "*".
+#         http_method: "*" # (Optional) Default "*".
+#         resource_arn: "*" # (Optional) Default "*".
+#         service_name: "*" # (Optional) Default "*".
+#         service_type: "*" # (Optional) Default "*".
+#         url_path: "*" # (Optional) Default "*".
+#         attributes: {} # (Optional) Default {}.
+#   telemetry: # (Optional) Account Observability Admin settings; default {}.
+#     evaluation: # (Optional) Account telemetry evaluation; default null.
+#       all_regions: true # (Optional) Exclusive with regions; default null (current Region only).
+#       # regions: ["us-east-1"] # (Optional) Exclusive with all_regions; default null (current Region only).
+#     enrichment: true # (Optional) Default false.
+#   log_account_policies: # (Optional) Map keyed by account policy name; default {}.
+#     example: # (Optional) Example policy.
+#       policy_document: '{"Fields":["requestId"]}' # (Required) Type-specific JSON.
+#       policy_type: "FIELD_INDEX_POLICY" # (Required) AWS API types: DATA_PROTECTION_POLICY, SUBSCRIPTION_FILTER_POLICY, FIELD_INDEX_POLICY, TRANSFORMER_POLICY, METRIC_EXTRACTION_POLICY; verify provider support.
+#       scope: "ALL" # (Optional) Only valid value is ALL; default ALL.
+#       # selection_criteria: null # (Optional) Type-specific selector; default null; omit for this example.
+```
+
+The corrected non-hub scaffold renders this `terragrunt.hcl` structure.
+`terraform.source` is pinned to the release tag resolved by scaffold; replace
+`vX.Y.Z` below with the tag containing these changes. The
+`local.local_vars.cloudwatch` value maps to the module input.
+
+```hcl
+locals {
+  local_vars  = yamldecode(file("./inputs.yaml"))
+  env_vars    = yamldecode(file(find_in_parent_folders("env-inputs.yaml")))
+  global_vars = yamldecode(file(find_in_parent_folders("global-inputs.yaml")))
+  global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
+  local_tags  = jsondecode(file("./local-tags.json"))
+
+  tags = merge(local.global_tags, local.local_tags)
+}
+
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "git::https://github.com/cloudopsworks/terraform-module-aws-observability-setup.git?ref=vX.Y.Z"
+}
+
+inputs = {
+  org        = local.env_vars.org
+  cloudwatch = try(local.local_vars.cloudwatch, {})
+  extra_tags = local.tags
+}
+```
+
+## Quick Start
+
+1. Configure AWS credentials and matching `aws` and `awscc` providers in the calling root stack, as shown in **Usage**.
+2. Scaffold a deployment as shown in **Usage**; inspect `inputs.yaml` and `terragrunt.hcl`.
+3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time, importing pre-existing singleton settings first.
+4. Run `terragrunt plan`, review account/Region changes and potential charges, then apply.
+
+
+## Examples
+
+### Application Signals and Transaction Search
+
+Put this in `inputs.yaml` to enable discovery, account grouping, and 1%
+indexing. Import any existing singleton before enabling it here.
+
+```yaml
+cloudwatch:
+  application_signals:
+    enabled: true
+    grouping_attributes:
+      - grouping_name: Environment
+        grouping_source_keys: [deployment.environment]
+        default_grouping_value: unknown
+  transaction_search:
+    indexing_percentage: 1
+```
+
+### X-Ray encryption, grouping, and sampling
+
+Sampling is separate from Transaction Search indexing. `NONE` selects X-Ray's
+service-managed trace encryption; use `KMS` with `key_id` only with a suitable
+customer-managed key.
+
+```yaml
+cloudwatch:
+  xray:
+    encryption:
+      type: NONE
+    groups:
+      checkout:
+        filter_expression: 'service("checkout")'
+        insights_enabled: true
+    sampling_rules:
+      checkout:
+        fixed_rate: 0.1
+        priority: 100
+        reservoir_size: 1
+```
+
+### Account telemetry
+
+Use only when AWS Organizations does not already own evaluation for the
+account. `all_regions` and `regions` are mutually exclusive.
+
+```yaml
+cloudwatch:
+  telemetry:
+    evaluation:
+      all_regions: true
+    enrichment: true
+```
 
 
 
@@ -63,32 +318,47 @@ Available targets:
 ## Requirements
 
 | Name | Version |
-|------|---------|
+| ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.4 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.69.0, < 7.0.0 |
+| <a name="requirement_awscc"></a> [awscc](#requirement\_awscc) | >= 1.58.0, < 2.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.4 |
+| ---- | ------- |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.71.0 |
+| <a name="provider_awscc"></a> [awscc](#provider\_awscc) | 1.108.0 |
 
 ## Modules
 
 | Name | Source | Version |
-|------|--------|---------|
+| ---- | ------ | ------- |
 | <a name="module_tags"></a> [tags](#module\_tags) | cloudopsworks/tags/local | 1.0.9 |
 
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
+| [aws_cloudwatch_log_account_policy.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_account_policy) | resource |
+| [aws_cloudwatch_log_resource_policy.transaction_search](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_resource_policy) | resource |
+| [aws_observabilityadmin_telemetry_enrichment.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_enrichment) | resource |
+| [aws_observabilityadmin_telemetry_evaluation.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) | resource |
+| [aws_xray_encryption_config.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_encryption_config) | resource |
+| [aws_xray_group.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_group) | resource |
+| [aws_xray_sampling_rule.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_sampling_rule) | resource |
+| [awscc_applicationsignals_discovery.this](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs/resources/applicationsignals_discovery) | resource |
+| [awscc_applicationsignals_grouping_configuration.this](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs/resources/applicationsignals_grouping_configuration) | resource |
+| [awscc_xray_transaction_search_config.this](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs/resources/xray_transaction_search_config) | resource |
+| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
+| [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
+| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | Optional account/Region CloudWatch, Application Signals, X-Ray, and Observability Admin settings. All singleton settings are disabled unless explicitly configured. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      indexing_percentage = number<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>  })</pre> | `{}` | no |
 | <a name="input_extra_tags"></a> [extra\_tags](#input\_extra\_tags) | Extra tags to add to the resources | `map(string)` | `{}` | no |
 | <a name="input_is_hub"></a> [is\_hub](#input\_is\_hub) | Is this a hub or spoke configuration? | `bool` | `false` | no |
 | <a name="input_org"></a> [org](#input\_org) | Organization details | <pre>object({<br/>    organization_name = string<br/>    organization_unit = string<br/>    environment_type  = string<br/>    environment_name  = string<br/>  })</pre> | n/a | yes |
@@ -96,7 +366,18 @@ Available targets:
 
 ## Outputs
 
-No outputs.
+| Name | Description |
+| ---- | ----------- |
+| <a name="output_application_signals_discovery_id"></a> [application\_signals\_discovery\_id](#output\_application\_signals\_discovery\_id) | Application Signals account discovery ID, or null when discovery is disabled. |
+| <a name="output_application_signals_grouping_id"></a> [application\_signals\_grouping\_id](#output\_application\_signals\_grouping\_id) | Application Signals account grouping configuration ID, or null when no grouping is configured. |
+| <a name="output_log_account_policy_ids"></a> [log\_account\_policy\_ids](#output\_log\_account\_policy\_ids) | CloudWatch Logs account policy IDs created by this module, keyed by policy name. |
+| <a name="output_telemetry_enrichment_id"></a> [telemetry\_enrichment\_id](#output\_telemetry\_enrichment\_id) | Observability Admin resource-tag enrichment ID, or null when disabled. |
+| <a name="output_telemetry_evaluation_id"></a> [telemetry\_evaluation\_id](#output\_telemetry\_evaluation\_id) | Observability Admin account telemetry evaluation ID, or null when disabled. |
+| <a name="output_transaction_search_id"></a> [transaction\_search\_id](#output\_transaction\_search\_id) | X-Ray Transaction Search account configuration ID, or null when disabled. |
+| <a name="output_transaction_search_log_policy_id"></a> [transaction\_search\_log\_policy\_id](#output\_transaction\_search\_log\_policy\_id) | CloudWatch Logs resource policy ID that permits X-Ray Transaction Search log writes, or null when disabled. |
+| <a name="output_xray_encryption_config_id"></a> [xray\_encryption\_config\_id](#output\_xray\_encryption\_config\_id) | X-Ray encryption configuration ID, or null when unmanaged. |
+| <a name="output_xray_group_arns"></a> [xray\_group\_arns](#output\_xray\_group\_arns) | ARNs of X-Ray groups created by this module, keyed by group name. |
+| <a name="output_xray_sampling_rule_arns"></a> [xray\_sampling\_rule\_arns](#output\_xray\_sampling\_rule\_arns) | ARNs of X-Ray sampling rules created by this module, keyed by rule name. |
 
 
 
@@ -104,7 +385,7 @@ No outputs.
 
 **Got a question?** We got answers. 
 
-File a GitHub [issue](https://github.com/cloudopsworks/terraform-module-aws-vpc-setup/issues), send us an [email][email] or join our [Slack Community][slack].
+File a GitHub [issue](https://github.com/cloudopsworks/terraform-module-aws-observability-setup/issues), send us an [email][email] or join our [Slack Community][slack].
 
 
 ## DevOps Tools
@@ -120,7 +401,7 @@ File a GitHub [issue](https://github.com/cloudopsworks/terraform-module-aws-vpc-
 
 ### Bug Reports & Feature Requests
 
-Please use the [issue tracker](https://github.com/cloudopsworks/terraform-module-aws-vpc-setup/issues) to report any bugs or file feature requests.
+Please use the [issue tracker](https://github.com/cloudopsworks/terraform-module-aws-observability-setup/issues) to report any bugs or file feature requests.
 
 
 
@@ -185,30 +466,30 @@ This project is maintained by [Cloud Ops Works LLC][website].
 [![Beacon][beacon]][website]
 
   [logo]: https://cloudopsworks.co/images/main-logo.png
-  [docs]: https://cloudopsworks.co/resources?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=docs
-  [website]: https://cloudopsworks.co?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=website
-  [github]: https://cloudopsworks.co/github?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=github
-  [jobs]: https://cloudopsworks.co/jobs?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=jobs
-  [hire]: https://cloudopsworks.co/hire?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=hire
-  [slack]: https://cloudopsworks.co/slack?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=slack
-  [linkedin]: https://cloudopsworks.co/linkedin?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=linkedin
-  [x]: https://cloudopsworks.co/x?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=x
-  [testimonial]: https://cloudopsworks.co/case-studies?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=testimonial
-  [office_hours]: https://cloudopsworks.co/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=office_hours
-  [newsletter]: https://cloudopsworks.co/resources?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=newsletter
-  [email]: https://cloudopsworks.co/contact?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=email
-  [commercial_support]: https://cloudopsworks.co/services?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=commercial_support
-  [we_love_open_source]: https://cloudopsworks.co/open-source?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=we_love_open_source
-  [terraform_modules]: https://cloudopsworks.co/open-source?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=terraform_modules
+  [docs]: https://cloudopsworks.co/resources?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=docs
+  [website]: https://cloudopsworks.co?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=website
+  [github]: https://cloudopsworks.co/github?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=github
+  [jobs]: https://cloudopsworks.co/jobs?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=jobs
+  [hire]: https://cloudopsworks.co/hire?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=hire
+  [slack]: https://cloudopsworks.co/slack?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=slack
+  [linkedin]: https://cloudopsworks.co/linkedin?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=linkedin
+  [x]: https://cloudopsworks.co/x?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=x
+  [testimonial]: https://cloudopsworks.co/case-studies?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=testimonial
+  [office_hours]: https://cloudopsworks.co/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=office_hours
+  [newsletter]: https://cloudopsworks.co/resources?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=newsletter
+  [email]: https://cloudopsworks.co/contact?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=email
+  [commercial_support]: https://cloudopsworks.co/services?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=commercial_support
+  [we_love_open_source]: https://cloudopsworks.co/open-source?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=we_love_open_source
+  [terraform_modules]: https://cloudopsworks.co/open-source?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=terraform_modules
   [readme_header_img]: https://cloudopsworks.co/images/readme-header.png
-  [readme_header_link]: https://cloudopsworks.co/readme/header/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=readme_header_link
+  [readme_header_link]: https://cloudopsworks.co/readme/header/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=readme_header_link
   [readme_footer_img]: https://cloudopsworks.co/images/main-logo-footer.png
-  [readme_footer_link]: https://cloudopsworks.co/readme/footer/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=readme_footer_link
+  [readme_footer_link]: https://cloudopsworks.co/readme/footer/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=readme_footer_link
   [readme_commercial_support_img]: https://cloudopsworks.co/readme/commercial-support/img
-  [readme_commercial_support_link]: https://cloudopsworks.co/readme/commercial-support/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-vpc-setup&utm_content=readme_commercial_support_link
-  [share_twitter]: https://x.com/intent/tweet/?text=Terraform+Transit+Gateway+Module&url=https://github.com/cloudopsworks/terraform-module-aws-vpc-setup
-  [share_linkedin]: https://www.linkedin.com/shareArticle?mini=true&title=Terraform+Transit+Gateway+Module&url=https://github.com/cloudopsworks/terraform-module-aws-vpc-setup
-  [share_reddit]: https://reddit.com/submit/?url=https://github.com/cloudopsworks/terraform-module-aws-vpc-setup
-  [share_facebook]: https://facebook.com/sharer/sharer.php?u=https://github.com/cloudopsworks/terraform-module-aws-vpc-setup
-  [share_email]: mailto:?subject=Terraform+Transit+Gateway+Module&body=https://github.com/cloudopsworks/terraform-module-aws-vpc-setup
-  [beacon]: https://ga-beacon.cloudopsworks.co/G-QMZVYYN2VN/cloudopsworks/terraform-module-aws-vpc-setup?pixel&cs=github&cm=readme&an=terraform-module-aws-vpc-setup
+  [readme_commercial_support_link]: https://cloudopsworks.co/readme/commercial-support/link?utm_source=github&utm_medium=readme&utm_campaign=cloudopsworks/terraform-module-aws-observability-setup&utm_content=readme_commercial_support_link
+  [share_twitter]: https://x.com/intent/tweet/?text=Terraform+AWS+CloudWatch+Observability+Setup+Module&url=https://github.com/cloudopsworks/terraform-module-aws-observability-setup
+  [share_linkedin]: https://www.linkedin.com/shareArticle?mini=true&title=Terraform+AWS+CloudWatch+Observability+Setup+Module&url=https://github.com/cloudopsworks/terraform-module-aws-observability-setup
+  [share_reddit]: https://reddit.com/submit/?url=https://github.com/cloudopsworks/terraform-module-aws-observability-setup
+  [share_facebook]: https://facebook.com/sharer/sharer.php?u=https://github.com/cloudopsworks/terraform-module-aws-observability-setup
+  [share_email]: mailto:?subject=Terraform+AWS+CloudWatch+Observability+Setup+Module&body=https://github.com/cloudopsworks/terraform-module-aws-observability-setup
+  [beacon]: https://ga-beacon.cloudopsworks.co/G-QMZVYYN2VN/cloudopsworks/terraform-module-aws-observability-setup?pixel&cs=github&cm=readme&an=terraform-module-aws-observability-setup

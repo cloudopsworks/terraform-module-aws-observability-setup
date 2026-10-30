@@ -1,30 +1,271 @@
-name: Terraform Transit Gateway Module
-#logo: logo/logo.jpg
+name: Terraform AWS CloudWatch Observability Setup Module
+
+badges:
+  - name: Latest Release
+    image: https://img.shields.io/github/release/cloudopsworks/terraform-module-aws-observability-setup.svg?style=for-the-badge
+    url: https://github.com/cloudopsworks/terraform-module-aws-observability-setup/releases/latest
+  - name: Last Updated
+    image: https://img.shields.io/github/last-commit/cloudopsworks/terraform-module-aws-observability-setup.svg?style=for-the-badge
+    url: https://github.com/cloudopsworks/terraform-module-aws-observability-setup/commits
 
 license: "APACHE2"
-
 copyrights:
   - name: "Cloud Ops Works LLC"
     url: "https://cloudops.works"
     year: "2024"
-
-github_repo: cloudopsworks/terraform-module-aws-vpc-setup
+github_repo: cloudopsworks/terraform-module-aws-observability-setup
 
 description: |-
-  VPC Module for setting up transit gateway with ResourceAccessMananger support.
+  Configure opt-in account/Region CloudWatch observability settings with the
+  HashiCorp AWS and AWS Cloud Control (AWSCC) Terraform providers. The module
+  covers Application Signals, X-Ray Transaction Search and trace controls,
+  Observability Admin account telemetry, and CloudWatch Logs account policies.
 
-# Introduction to the project
-#introduction: |-
-#  This is an introduction.
+introduction: |-
+  This module manages **account/Region settings**, not workload instrumentation.
+  The optional `cloudwatch` input defaults to `{}` and creates no account-setting
+  resources. Deploy at most one instance of this module per AWS account and
+  Region (preferably in a shared or hub stack). Enable only settings this
+  Terraform state should own. Inventory and import existing singleton settings
+  before enabling them; two states must not own one setting. CloudWatch Logs
+  resource/account policies and X-Ray encryption use create-or-update APIs,
+  so applying a duplicate owner can overwrite existing settings instead of
+  failing safely.
 
-# How to use this project
-#usage: |-
+  | Capability | Terraform ownership | Input |
+  | --- | --- | --- |
+  | Application Signals discovery and grouping | `awscc_applicationsignals_discovery`, `awscc_applicationsignals_grouping_configuration` | `cloudwatch.application_signals` |
+  | X-Ray Transaction Search | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.transaction_search` |
+  | X-Ray trace encryption, groups, sampling | `aws_xray_encryption_config`, `aws_xray_group`, `aws_xray_sampling_rule` | `cloudwatch.xray` |
+  | Account telemetry inventory and tag enrichment | `aws_observabilityadmin_telemetry_evaluation`, `aws_observabilityadmin_telemetry_enrichment` | `cloudwatch.telemetry` |
+  | CloudWatch Logs account policies | `aws_cloudwatch_log_account_policy` | `cloudwatch.log_account_policies` |
 
-# Example usage
-#examples: |-
+  AWSCC owns Transaction Search indexing/destination. **Do not also manage**
+  `aws_xray_indexing_rule` or `aws_xray_trace_segment_destination` in the same
+  account/Region. X-Ray sampling is separate from indexing. The module creates
+  the scoped Logs resource policy for `aws/spans` and
+  `/aws/application-signals/data` before Transaction Search. The
+  `indexing_percentage` input is **0–100 percent**, not a fraction. See
+  [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search-Cloudformation.html)
+  and [the configuration reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-xray-transactionsearchconfig.html).
 
-# How to get started quickly
-#quickstart: |-
+  Application Signals discovery enables account integration; it does not install
+  collectors or instrument workloads. Grouping owns one whole-account
+  configuration. Existing discovery requires import, not blind recreation;
+  older discovery may require a separate Application Map migration. See
+  [Application Signals discovery](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-applicationsignals-discovery.html).
+
+  **Prerequisites and limits**
+
+  - Terraform `>= 1.3`, AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.58.0, < 2.0.0`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
+  - Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Some settings create service-linked roles.
+  - Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
+  - X-Ray `encryption` configures traces, **not** the CloudWatch Logs `aws/spans` group. Destroying `aws_xray_encryption_config` does not reset the service setting: apply `type: NONE` before removing the input if you intend to revert KMS encryption. This module does not expose the AWSCC Transaction Search create-only KMS setting; changing it requires a deliberate migration. See [X-Ray encryption config](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_encryption_config).
+  - Logs account-policy JSON and selection criteria are type-specific; `scope` currently accepts only `ALL`. The [current Logs API](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutAccountPolicy.html) lists `METRIC_EXTRACTION_POLICY` in addition to the four types in the [AWS provider v6.71 documentation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/r/cloudwatch_log_account_policy.html.markdown), so verify provider support before using that newer type. A subscription-filter policy can export account-wide logs; a data-protection policy can incur per-GB scanning charges. A metric-extraction policy can suppress Application Signals metrics if it includes `/aws/application-signals/data`.
+  - Transaction Search includes indexing of 1% of ingested spans, but span ingestion is still billed; indexing above 1% can add cost. See [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html) and [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/). Enabling enrichment or other logging can also incur charges.
+
+  Workload instrumentation, dashboards, alarms, OAM links, and organization-wide
+  telemetry rules are separate deployments, not features of this module.
+
+usage: |-
+  Begin with the [Terragrunt scaffold](https://docs.terragrunt.com/reference/cli/commands/scaffold).
+  Create and enter the target directory first; scaffold writes `terragrunt.hcl`,
+  `inputs.yaml`, and `local-tags.json` into the current directory.
+
+  ```sh
+  mkdir -p dev/us-east-1/shared/cloudwatch-observability
+  cd dev/us-east-1/shared/cloudwatch-observability
+  terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-observability-setup
+  vi inputs.yaml
+  # Ensure the parent root.hcl configures both providers as shown below.
+  terragrunt plan
+  terragrunt apply
+  ```
+
+  Scaffold resolves the latest release tag into a pinned `terraform.source`.
+  Use a release (or tested pre-release) tag that contains these scaffold fixes;
+  older published tags may still contain the prior template errors. Before
+  applying, configure both providers in the parent Terragrunt `root.hcl` with
+  the same Region, source profile, and target role. For example, set
+  `AWS_REGION`, `AWS_PROFILE`, and `OBSERVABILITY_ROLE_ARN` and use:
+
+  ```hcl
+  generate "observability_providers" {
+    path      = "observability-providers.tf"
+    if_exists = "overwrite_terragrunt"
+    contents  = <<-EOF
+  provider "aws" {
+    region  = "${get_env("AWS_REGION")}"
+    profile = "${get_env("AWS_PROFILE")}"
+    assume_role {
+      role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
+    }
+  }
+
+  provider "awscc" {
+    region  = "${get_env("AWS_REGION")}"
+    profile = "${get_env("AWS_PROFILE")}"
+    assume_role = {
+      role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
+    }
+  }
+  EOF
+  }
+  ```
+
+  The AWS provider uses an `assume_role` block; AWSCC uses an
+  `assume_role` object. See the [AWS provider](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/index.html.markdown)
+  and [AWSCC provider](https://github.com/hashicorp/terraform-provider-awscc/blob/v1.108.0/docs/index.md)
+  configuration references. If your root stack already generates providers,
+  add AWSCC to that generator instead of creating a second provider file.
+
+  The Terragrunt hierarchy must provide `root.hcl`, `env-inputs.yaml`,
+  `global-inputs.yaml`, and `global-tags.json` in parent directories. The
+  scaffold creates `local-tags.json`. The `shared` directory is the single
+  logical owner for this account/Region, not an AWS isolation boundary. Choose
+  non-hub scaffold mode for the example below. Review the plan before changing
+  account-wide settings.
+
+  The generated `inputs.yaml` contains this module-specific key and annotated
+  option tree as comments. There is only one `cloudwatch` key in the generated
+  file, commented out by default, so the module uses its safe `{}` default.
+  Uncomment that key and replace the empty object only for settings this state
+  will own; the nested lines are illustrative comments, not a second key.
+
+  ```yaml
+  #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
+  #   application_signals: # (Optional) Discovery/grouping settings; default {}.
+  #     enabled: true # (Optional) Default false.
+  #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
+  #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
+  #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
+  #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
+  #   transaction_search: # (Optional) X-Ray Transaction Search; default null.
+  #     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+  #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+  #   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
+  #     encryption: # (Optional) Trace encryption; default null.
+  #       type: "KMS" # (Required) NONE or KMS.
+  #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Required for KMS; default null.
+  #     groups: # (Optional) Map keyed by group name; default {}.
+  #       checkout: # (Optional) Example group.
+  #         filter_expression: 'service("checkout")' # (Required) X-Ray filter expression.
+  #         insights_enabled: true # (Optional) Default false.
+  #         notifications_enabled: false # (Optional) Default false.
+  #     sampling_rules: # (Optional) Map keyed by rule name; default {}.
+  #       checkout: # (Optional) Example rule.
+  #         fixed_rate: 0.1 # (Required) Fraction, 0-1.
+  #         priority: 100 # (Required) 1-9999.
+  #         reservoir_size: 1 # (Required) Nonnegative integer.
+  #         host: "*" # (Optional) Default "*".
+  #         http_method: "*" # (Optional) Default "*".
+  #         resource_arn: "*" # (Optional) Default "*".
+  #         service_name: "*" # (Optional) Default "*".
+  #         service_type: "*" # (Optional) Default "*".
+  #         url_path: "*" # (Optional) Default "*".
+  #         attributes: {} # (Optional) Default {}.
+  #   telemetry: # (Optional) Account Observability Admin settings; default {}.
+  #     evaluation: # (Optional) Account telemetry evaluation; default null.
+  #       all_regions: true # (Optional) Exclusive with regions; default null (current Region only).
+  #       # regions: ["us-east-1"] # (Optional) Exclusive with all_regions; default null (current Region only).
+  #     enrichment: true # (Optional) Default false.
+  #   log_account_policies: # (Optional) Map keyed by account policy name; default {}.
+  #     example: # (Optional) Example policy.
+  #       policy_document: '{"Fields":["requestId"]}' # (Required) Type-specific JSON.
+  #       policy_type: "FIELD_INDEX_POLICY" # (Required) AWS API types: DATA_PROTECTION_POLICY, SUBSCRIPTION_FILTER_POLICY, FIELD_INDEX_POLICY, TRANSFORMER_POLICY, METRIC_EXTRACTION_POLICY; verify provider support.
+  #       scope: "ALL" # (Optional) Only valid value is ALL; default ALL.
+  #       # selection_criteria: null # (Optional) Type-specific selector; default null; omit for this example.
+  ```
+
+  The corrected non-hub scaffold renders this `terragrunt.hcl` structure.
+  `terraform.source` is pinned to the release tag resolved by scaffold; replace
+  `vX.Y.Z` below with the tag containing these changes. The
+  `local.local_vars.cloudwatch` value maps to the module input.
+
+  ```hcl
+  locals {
+    local_vars  = yamldecode(file("./inputs.yaml"))
+    env_vars    = yamldecode(file(find_in_parent_folders("env-inputs.yaml")))
+    global_vars = yamldecode(file(find_in_parent_folders("global-inputs.yaml")))
+    global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
+    local_tags  = jsondecode(file("./local-tags.json"))
+
+    tags = merge(local.global_tags, local.local_tags)
+  }
+
+  include "root" {
+    path = find_in_parent_folders("root.hcl")
+  }
+
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-module-aws-observability-setup.git?ref=vX.Y.Z"
+  }
+
+  inputs = {
+    org        = local.env_vars.org
+    cloudwatch = try(local.local_vars.cloudwatch, {})
+    extra_tags = local.tags
+  }
+  ```
+
+examples: |-
+  ### Application Signals and Transaction Search
+
+  Put this in `inputs.yaml` to enable discovery, account grouping, and 1%
+  indexing. Import any existing singleton before enabling it here.
+
+  ```yaml
+  cloudwatch:
+    application_signals:
+      enabled: true
+      grouping_attributes:
+        - grouping_name: Environment
+          grouping_source_keys: [deployment.environment]
+          default_grouping_value: unknown
+    transaction_search:
+      indexing_percentage: 1
+  ```
+
+  ### X-Ray encryption, grouping, and sampling
+
+  Sampling is separate from Transaction Search indexing. `NONE` selects X-Ray's
+  service-managed trace encryption; use `KMS` with `key_id` only with a suitable
+  customer-managed key.
+
+  ```yaml
+  cloudwatch:
+    xray:
+      encryption:
+        type: NONE
+      groups:
+        checkout:
+          filter_expression: 'service("checkout")'
+          insights_enabled: true
+      sampling_rules:
+        checkout:
+          fixed_rate: 0.1
+          priority: 100
+          reservoir_size: 1
+  ```
+
+  ### Account telemetry
+
+  Use only when AWS Organizations does not already own evaluation for the
+  account. `all_regions` and `regions` are mutually exclusive.
+
+  ```yaml
+  cloudwatch:
+    telemetry:
+      evaluation:
+        all_regions: true
+      enrichment: true
+  ```
+
+quickstart: |-
+  1. Configure AWS credentials and matching `aws` and `awscc` providers in the calling root stack, as shown in **Usage**.
+  2. Scaffold a deployment as shown in **Usage**; inspect `inputs.yaml` and `terragrunt.hcl`.
+  3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time, importing pre-existing singleton settings first.
+  4. Run `terragrunt plan`, review account/Region changes and potential charges, then apply.
 
 include:
   - "docs/targets.md"

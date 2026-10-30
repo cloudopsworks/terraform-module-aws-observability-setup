@@ -1,4 +1,47 @@
 # Module configuration
+# Optional CloudWatch account/Region settings (all disabled when omitted).
+#cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
+#   application_signals: # (Optional) Discovery/grouping settings; default {}.
+#     enabled: true # (Optional) Default false.
+#     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
+#       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
+#         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
+#         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
+#   transaction_search: # (Optional) X-Ray Transaction Search; default null.
+#     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+#     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+#   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
+#     encryption: # (Optional) Trace encryption; default null.
+#       type: "KMS" # (Required) NONE or KMS.
+#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Required for KMS; default null.
+#     groups: # (Optional) Map keyed by group name; default {}.
+#       checkout: # (Optional) Example group.
+#         filter_expression: 'service("checkout")' # (Required) X-Ray filter expression.
+#         insights_enabled: true # (Optional) Default false.
+#         notifications_enabled: false # (Optional) Default false.
+#     sampling_rules: # (Optional) Map keyed by rule name; default {}.
+#       checkout: # (Optional) Example rule.
+#         fixed_rate: 0.1 # (Required) Fraction, 0-1.
+#         priority: 100 # (Required) 1-9999.
+#         reservoir_size: 1 # (Required) Nonnegative integer.
+#         host: "*" # (Optional) Default "*".
+#         http_method: "*" # (Optional) Default "*".
+#         resource_arn: "*" # (Optional) Default "*".
+#         service_name: "*" # (Optional) Default "*".
+#         service_type: "*" # (Optional) Default "*".
+#         url_path: "*" # (Optional) Default "*".
+#         attributes: {} # (Optional) Default {}.
+#   telemetry: # (Optional) Account Observability Admin settings; default {}.
+#     evaluation: # (Optional) Account telemetry evaluation; default null.
+#       all_regions: true # (Optional) Exclusive with regions; default null (current Region only).
+#       # regions: ["us-east-1"] # (Optional) Exclusive with all_regions; default null (current Region only).
+#     enrichment: true # (Optional) Default false.
+#   log_account_policies: # (Optional) Map keyed by account policy name; default {}.
+#     example: # (Optional) Example policy.
+#       policy_document: '{"Fields":["requestId"]}' # (Required) Type-specific JSON.
+#       policy_type: "FIELD_INDEX_POLICY" # (Required) AWS API types: DATA_PROTECTION_POLICY, SUBSCRIPTION_FILTER_POLICY, FIELD_INDEX_POLICY, TRANSFORMER_POLICY, METRIC_EXTRACTION_POLICY; verify provider support.
+#       scope: "ALL" # (Optional) Only valid value is ALL; default ALL.
+#       # selection_criteria: null # (Optional) Type-specific selector; default null; omit for this example.
 # Required variables
 {{- range .requiredVariables }}
 {{- if ne .Name "org"}}
@@ -9,7 +52,7 @@
 {{- end }}
 # Optional variables
 {{- range .optionalVariables }}
-{{- if ne .Name "is_hub" "spoke_def" "extra_args" }}
+{{- if and (ne .Name "is_hub") (ne .Name "spoke_def") (ne .Name "extra_args") (ne .Name "extra_tags") (ne .Name "cloudwatch") }}
 # Description {{ .Description }} , Type: {{ .Type }}
 #{{ .Name }}: {{ .DefaultValue }}
 {{- end }}
