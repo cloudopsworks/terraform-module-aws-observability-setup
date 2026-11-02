@@ -2,16 +2,24 @@
 # Optional CloudWatch account/Region settings (all disabled when omitted).
 #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
 #   application_signals: # (Optional) Discovery/grouping settings; default {}.
-#     enabled: true # (Optional) Default false.
+#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while spans are ingested.
+#     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": send X-Ray spans to the aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set).
+#     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percent of ingested spans indexed, 0-100; default null (1, the included tier); exclusive with transaction_search.indexing_percentage; needs ingest_otel_spans or a transaction_search block.
+#     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
 #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
 #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
 #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
 #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
-#   transaction_search: # (Optional) X-Ray Transaction Search; default null.
-#     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+#   transaction_search: # (Optional) Advanced Transaction Search settings; the block alone also enables span ingestion (v1.0.0 behaviour); default null; use {} for all defaults (an empty key is null).
+#     enabled: true # (Optional) Same switch as application_signals.ingest_otel_spans (must not disagree); default null (follows ingest_otel_spans, otherwise true).
+#     indexing_percentage: 1 # (Optional) Same setting as application_signals.trace_indexing_rate (set only one), 0-100; default null (1).
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before turning ingestion off; match the indexing rate to the current value.
+#     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
+#       type: "KMS" # (Required) NONE (no key at creation) or KMS.
+#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
 #   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
-#     encryption: # (Optional) Trace encryption; default null.
+#     encryption: # (Optional) Trace encryption override; default null (module key when encryption.enabled, otherwise unmanaged).
 #       type: "KMS" # (Required) NONE or KMS.
 #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Required for KMS; default null.
 #     groups: # (Optional) Map keyed by group name; default {}.
@@ -42,20 +50,21 @@
 #       policy_type: "FIELD_INDEX_POLICY" # (Required) AWS API types: DATA_PROTECTION_POLICY, SUBSCRIPTION_FILTER_POLICY, FIELD_INDEX_POLICY, TRANSFORMER_POLICY, METRIC_EXTRACTION_POLICY; verify provider support.
 #       scope: "ALL" # (Optional) Only valid value is ALL; default ALL.
 #       # selection_criteria: null # (Optional) Type-specific selector; default null; omit for this example.
-# Required variables
-{{- range .requiredVariables }}
-{{- if ne .Name "org"}}
-# Description {{ .Description }} , Type: {{ .Type }}
-{{ .Name }}: {{ .DefaultValuePlaceholder }}
-{{- end }}
-
-{{- end }}
-# Optional variables
-{{- range .optionalVariables }}
-{{- if and (ne .Name "is_hub") (ne .Name "spoke_def") (ne .Name "extra_args") (ne .Name "extra_tags") (ne .Name "cloudwatch") }}
-# Description {{ .Description }} , Type: {{ .Type }}
-#{{ .Name }}: {{ .DefaultValue }}
-{{- end }}
-
-{{- end }}
-
+#   log_groups: # (Optional) Map keyed by log group name (1-512 of a-z A-Z 0-9 . - _ / #, not starting with aws/); default {}.
+#     /app/checkout: # (Optional) Example log group.
+#       retention_in_days: 30 # (Optional) 0 (never expire), 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653; default null (never expire).
+#       log_group_class: "STANDARD" # (Optional) STANDARD, INFREQUENT_ACCESS or DELIVERY; default STANDARD; set at creation only, later changes are ignored.
+#       deletion_protection_enabled: true # (Optional) Block deletion until set to false; default null (keeps the current setting; new log groups are unprotected).
+#       skip_destroy: false # (Optional) Keep the log group and its data on destroy; default false.
+#       encryption: # (Optional) Module key override; default null (module key when encryption.enabled).
+#         type: "KMS" # (Required) NONE (CloudWatch Logs default encryption) or KMS.
+#         key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN, not an ID or alias; required for KMS.
+#       tags: {} # (Optional) Extra tags for this log group; default {}.
+#   encryption: # (Optional) Module KMS key for log groups, X-Ray, and aws/spans; default {} (disabled).
+#     enabled: true # (Optional) Create the key, alias, and attachable IAM policy, and apply the key wherever no override is set; default false.
+#     alias_name: "observability" # (Optional) Alias without the alias/ prefix, not starting with aws/; default "<system_name>-observability".
+#     deletion_window_in_days: 30 # (Optional) Key deletion waiting period, 7-30 days; default 30.
+#     rotation_period_in_days: 365 # (Optional) Rotation period (rotation is always on), 90-2560 days; default 365.
+#     iam_policy: # (Optional) Attachable key-use policy for roles that write or read encrypted data; default {}.
+#       name: "observability-encryption" # (Optional) Account-wide name, 1-128 of A-Z a-z 0-9 +=,.@_-; default "<org unit>-<env name>-<env type>-<spoke>-<region>-observability-encryption".
+#       path: "/" # (Optional) IAM path up to 512 printable characters, no spaces, beginning and ending with /; default "/".

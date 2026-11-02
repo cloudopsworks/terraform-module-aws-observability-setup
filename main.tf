@@ -11,9 +11,49 @@ data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
 
-# AWSCC owns the Application Signals account discovery singleton.
+locals {
+  # Span ingestion (console "Ingest OpenTelemetry spans") is Transaction
+  # Search, set by transaction_search.enabled or ingest_otel_spans (they must agree); a bare
+  # transaction_search block still enables it as in v1.0.0. Validations in
+  # variables-cw.tf repeat these ingestion and rate rules (they cannot read
+  # locals), and the policy-name fallback repeats the type default; keep them
+  # in sync.
+  transaction_search_enabled = coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
+  transaction_search_indexing_percentage = coalesce(
+    var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage,
+    var.cloudwatch.application_signals.trace_indexing_rate,
+    1
+  )
+  transaction_search_policy_name = var.cloudwatch.transaction_search == null ? "CloudWatchTransactionSearch" : var.cloudwatch.transaction_search.policy_name
+  # Enabling Transaction Search also starts Application Signals discovery in
+  # AWS, so the module manages discovery whenever either setting is enabled.
+  application_signals_enabled = var.cloudwatch.application_signals.enabled || local.transaction_search_enabled
+  application_signals_import  = local.application_signals_enabled && var.cloudwatch.application_signals.import_existing
+  transaction_search_import   = var.cloudwatch.transaction_search == null ? false : (local.transaction_search_enabled && var.cloudwatch.transaction_search.import_existing)
+}
+
+# AWSCC owns the Application Signals account discovery singleton. Creating it
+# creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role.
 resource "awscc_applicationsignals_discovery" "this" {
-  count = var.cloudwatch.application_signals.enabled ? 1 : 0
+  count = local.application_signals_enabled ? 1 : 0
+}
+
+# Adopt singletons that already exist in the account, for example from the
+# console, instead of failing to create them. Import blocks are valid only in a
+# root module, which this module is when Terragrunt deploys it. Once imported,
+# the block is a no-op, so the flag can stay set.
+import {
+  for_each = local.application_signals_import ? { discovery = 0 } : {}
+
+  to = awscc_applicationsignals_discovery.this[each.value]
+  id = data.aws_caller_identity.current.account_id
+}
+
+import {
+  for_each = local.transaction_search_import ? { transaction_search = 0 } : {}
+
+  to = awscc_xray_transaction_search_config.this[each.value]
+  id = data.aws_caller_identity.current.account_id
 }
 
 resource "awscc_applicationsignals_grouping_configuration" "this" {
@@ -34,9 +74,9 @@ resource "awscc_applicationsignals_grouping_configuration" "this" {
 # Search is enabled. AWSCC owns indexing/destination; do not also manage the
 # overlapping aws_xray_indexing_rule or aws_xray_trace_segment_destination.
 resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
-  count = var.cloudwatch.transaction_search == null ? 0 : 1
+  count = local.transaction_search_enabled ? 1 : 0
 
-  policy_name = var.cloudwatch.transaction_search.policy_name
+  policy_name = local.transaction_search_policy_name
   policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -63,19 +103,38 @@ resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
 }
 
 resource "awscc_xray_transaction_search_config" "this" {
-  count = var.cloudwatch.transaction_search == null ? 0 : 1
+  count = local.transaction_search_enabled ? 1 : 0
 
-  indexing_percentage = var.cloudwatch.transaction_search.indexing_percentage
+  indexing_percentage = local.transaction_search_indexing_percentage
+  cloudwatch_logs_configuration = local.transaction_search_spans_encrypted ? {
+    spans_log_group_kms_key_id = local.transaction_search_spans_key_arn
+  } : null
 
-  depends_on = [aws_cloudwatch_log_resource_policy.transaction_search]
+  lifecycle {
+    # X-Ray applies the spans key only when it first creates aws/spans, and
+    # changing it replaces this resource, which fails while Transaction Search
+    # is enabled. Re-key an existing aws/spans with AssociateKmsKey instead.
+    ignore_changes = [cloudwatch_logs_configuration]
+  }
+
+  # Module log groups exist first, so a declared /aws/application-signals/data
+  # is created with its key before Transaction Search would create it unkeyed.
+  # Discovery is created first because this resource also starts discovery,
+  # which would make a later discovery create fail as already existing.
+  depends_on = [
+    aws_cloudwatch_log_resource_policy.transaction_search,
+    aws_cloudwatch_log_group.this,
+    awscc_applicationsignals_discovery.this
+  ]
 }
 
-# AWS manages separate X-Ray encryption, grouping and sampling controls.
+# AWS manages separate X-Ray encryption, grouping and sampling controls. A
+# local xray.encryption block wins; otherwise the module key applies.
 resource "aws_xray_encryption_config" "this" {
-  count = var.cloudwatch.xray.encryption == null ? 0 : 1
+  count = (var.cloudwatch.xray.encryption != null || local.encryption_enabled) ? 1 : 0
 
-  type   = var.cloudwatch.xray.encryption.type
-  key_id = var.cloudwatch.xray.encryption.key_id
+  type   = var.cloudwatch.xray.encryption == null ? "KMS" : var.cloudwatch.xray.encryption.type
+  key_id = var.cloudwatch.xray.encryption == null ? local.encryption_key_arn : var.cloudwatch.xray.encryption.key_id
 }
 
 resource "aws_xray_group" "this" {
@@ -130,5 +189,26 @@ resource "aws_cloudwatch_log_account_policy" "this" {
   policy_type        = each.value.policy_type
   scope              = each.value.scope
   selection_criteria = each.value.selection_criteria
+}
+
+# A local encryption block wins; otherwise the module key applies (null keeps
+# CloudWatch Logs default encryption when module encryption is disabled).
+resource "aws_cloudwatch_log_group" "this" {
+  for_each = var.cloudwatch.log_groups
+
+  name                        = each.key
+  retention_in_days           = each.value.retention_in_days
+  log_group_class             = each.value.log_group_class
+  deletion_protection_enabled = each.value.deletion_protection_enabled
+  skip_destroy                = each.value.skip_destroy
+  kms_key_id                  = each.value.encryption == null ? local.encryption_key_arn : each.value.encryption.key_id
+  tags                        = merge(local.all_tags, each.value.tags)
+
+  lifecycle {
+    # The class is fixed at creation, so any diff forces a replacement that
+    # deletes the log group and its data. AWS also starts returning ESSENTIALS
+    # for INFREQUENT_ACCESS in December 2026, which this provider does not map.
+    ignore_changes = [log_group_class]
+  }
 }
 
