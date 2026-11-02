@@ -87,50 +87,79 @@ older discovery may require a separate Application Map migration. See
 **Encryption**
 
 `cloudwatch.encryption.enabled: true` creates a symmetric KMS key with
-automatic rotation always on, an alias (default
-`alias/<system_name>-observability`), and an attachable IAM policy (default
-name `<system_name>-observability-encryption`). `<system_name>` is
-`<org unit>-<environment name>-<environment type>-<spoke>-<region code>`,
-for example `devops-prod-production-001-usea1`. The module applies the key to
-every target that has no local override:
+automatic rotation always on, an alias, and an attachable IAM policy. The
+alias defaults to `alias/<system_name>-observability`, where `<system_name>`
+is `<org unit>-<environment name>-<environment type>-<spoke>-<region code>`,
+for example `devops-prod-production-001-usea1`. IAM policy names are
+account-wide and short Region codes can collide (`ap-south-1` and
+`ap-southeast-1` both shorten to `apso1`), so the policy name defaults to the
+full Region name, for example
+`devops-prod-production-001-us-east-1-observability-encryption`. The module
+applies the key to every target that has no local override:
 
 | Target | Module key applied to | Local override |
 | --- | --- | --- |
 | Module log groups | `kms_key_id` of each `cloudwatch.log_groups` entry | `log_groups.<name>.encryption`: `type: NONE` keeps CloudWatch Logs default encryption; `type: KMS` with a key ARN uses that key |
-| X-Ray traces | `aws_xray_encryption_config` with `type: KMS`; this state then owns the account/Region X-Ray encryption setting | `xray.encryption` |
+| X-Ray traces | `aws_xray_encryption_config` with `type: KMS` | `xray.encryption` |
 | Transaction Search spans (`aws/spans`) | `spans_log_group_kms_key_id`, **only when Transaction Search is first enabled** | `transaction_search.spans_encryption` |
+| Transaction Search `/aws/application-signals/data` | Only when declared in `cloudwatch.log_groups` (see below) | That entry's `encryption` |
+
+With encryption enabled, this state always owns the account/Region X-Ray
+encryption setting, either with the module key or with your `xray.encryption`
+override; it cannot leave X-Ray encryption to another owner.
 
 The key policy keeps the account-root statement, so IAM policies in the
 account can grant use of the key, and lets the Regional CloudWatch Logs
 service principal use it only for log groups in this account and Region.
 CloudWatch Logs requires every role that writes to or reads from an
 encrypted log group to hold key permissions through `kms:ViaService`. Attach
-the `encryption_policy_arn` output to those roles (for example Lambda
-execution roles, ECS task roles, CloudWatch agent or ADOT collector roles, and
-flow-log delivery roles). The policy grants key use through CloudWatch Logs
-and X-Ray in this Region only; it does not grant `logs:` or `xray:` write
-actions, so keep each role's existing logging and tracing policies. See
-[CloudWatch Logs KMS encryption](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-log-data-kms.html)
+the `encryption_policy_arn` output to those roles, for example Lambda
+execution roles, ECS task execution roles (`awslogs` driver) or task roles
+(FireLens), CloudWatch agent or ADOT collector roles, and flow-log delivery
+roles. The policy grants key use through CloudWatch Logs, plus
+`kms:Decrypt` through X-Ray for roles that read encrypted traces. Trace
+writers need no key permission, because X-Ray encrypts through the grant
+created when its encryption is configured. The policy grants no `logs:` or
+`xray:` actions, so keep each role's existing logging and tracing policies.
+See [CloudWatch Logs KMS encryption](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-log-data-kms.html)
 and [X-Ray data protection](https://docs.aws.amazon.com/xray/latest/devguide/xray-console-encryption.html).
 
 X-Ray sets the `aws/spans` key only while it creates that log group during
-Transaction Search enablement. Changing it afterwards replaces the
-configuration, which fails while Transaction Search is on, so the module
-ignores later changes. Two cases need the key associated once by hand, with
+Transaction Search enablement, and the key must be a key ARN in this account
+and Region. Changing it afterwards replaces the configuration, which fails
+while Transaction Search is on, so the module ignores later changes. Two
+cases need the key associated once by hand (this needs
+`logs:AssociateKmsKey`), with
 `aws logs associate-kms-key --log-group-name aws/spans --kms-key-id <kms_key_arn>`:
 
-- Transaction Search was already enabled by this state before encryption was
-  turned on. The plan leaves `aws/spans` unchanged.
+- Transaction Search was already enabled before encryption was turned on,
+  whether by this state or outside Terraform and then imported. The plan
+  leaves `aws/spans` unchanged.
 - `aws/spans` already exists while Transaction Search is being enabled, for
   example after an earlier enablement. A keyed enablement fails here, so set
   `transaction_search.spans_encryption.type: NONE` first.
 
+The spans key covers only `aws/spans`. To encrypt
+`/aws/application-signals/data` as well, declare it in `cloudwatch.log_groups`
+before Transaction Search is first enabled. The module creates its log groups
+before it enables Transaction Search, so the group gets the module key or its
+own override. If the log group already exists, adopt it as described below
+and the key is associated in place for newly ingested data. See
+[Transaction Search encryption](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html#Enable-TransactionSearch-kms).
+
 **Log groups**
 
 `cloudwatch.log_groups` is keyed by log group name; names cannot start with
-`aws/`. Import an existing log group before declaring it, or creation fails:
-`terragrunt import 'aws_cloudwatch_log_group.this["/app/checkout"]' /app/checkout`.
-`retention_in_days` defaults to never expire. `log_group_class` is set at
+`aws/`. Creating a log group that already exists fails. To adopt one, declare
+it in `log_groups` with its current retention, class, key (`encryption`
+override), deletion protection, and tags; import it before the first apply
+with `terragrunt import 'aws_cloudwatch_log_group.this["/app/checkout"]' /app/checkout`;
+and review the plan. Unset settings are reconciled to module values: a null
+`retention_in_days` removes the retention policy (never expire), and a group
+without an `encryption` override moves to the module key, or to default
+encryption when module encryption is off. `deletion_protection_enabled`
+defaults to null, which keeps the current setting; new log groups are created
+without protection. `log_group_class` is set at
 creation only and later changes are ignored: AWS cannot change a class, so a
 diff would replace the log group and delete its data. AWS also starts
 reporting `INFREQUENT_ACCESS` log groups as `ESSENTIALS` in December 2026
@@ -140,12 +169,13 @@ Data Firehose and keeps events for a fixed, short period.
 
 **Prerequisites and limits**
 
-- Terraform `>= 1.3`, AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.58.0, < 2.0.0`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
+- Terraform `>= 1.3`, AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
 - Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Some settings create service-linked roles.
 - Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
 - X-Ray `encryption` configures traces, **not** the CloudWatch Logs `aws/spans` group; `aws/spans` follows `transaction_search.spans_encryption` as described in **Encryption**. The AWS provider accepts only an ARN (key or alias ARN) for `xray.encryption.key_id`. Destroying `aws_xray_encryption_config` does not reset the service setting: apply `type: NONE` before removing the input if you intend to revert KMS encryption. See [X-Ray encryption config](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_encryption_config).
-- With `encryption.enabled`, the deploying principal also needs permission to create and manage the KMS key, alias, and IAM policy; `kms:DescribeKey` on every key it associates with a log group or `aws/spans`; and `kms:CreateGrant` plus `kms:DescribeKey` on the key used for X-Ray.
-- **Turning encryption off, or destroying the module, schedules the key for deletion** after `deletion_window_in_days` (default 30). A key pending deletion cannot be used: X-Ray stops storing traces while its setting still names the key, and log data already encrypted with the key, including `aws/spans` and log groups kept by `skip_destroy`, becomes unreadable. To stop encrypting new data but keep existing data readable, leave `encryption.enabled: true` and set local `type: NONE` overrides. Before turning encryption off, set `xray.encryption.type: NONE`, disassociate the key from `aws/spans` and any retained log groups, and wait for data encrypted with the key to expire. Cancel an unintended deletion with `aws kms cancel-key-deletion`.
+- With `encryption.enabled`, the deploying principal also needs permission to create and manage the KMS key, alias, and IAM policy; `kms:DescribeKey` on every key it associates with a log group or `aws/spans`; and `kms:CreateGrant` plus `kms:DescribeKey` on the key used for X-Ray. X-Ray stops storing traces if the principal that configured its encryption loses access to the key, so keep the deploying role's key permissions in place.
+- IAM cannot delete a policy that is still attached. Detach `encryption_policy_arn` from every role, and remove it from consumer stacks, before turning encryption off, destroying the module, or changing `iam_policy.name` or `iam_policy.path` (either change replaces the policy). Otherwise the apply stops partway.
+- **Turning encryption off, or destroying the module, schedules the key for deletion** after `deletion_window_in_days` (default 30). A key pending deletion cannot be used: X-Ray stops storing traces while its setting still names the key, and log data already encrypted with the key, including `aws/spans` and log groups kept by `skip_destroy`, becomes unreadable. Data in never-expire log groups never ages out, so it becomes permanently unreadable once the key is deleted. To stop encrypting new data but keep existing data readable, leave `encryption.enabled: true` and set local `type: NONE` overrides. Before turning encryption off, set `xray.encryption.type: NONE`, disassociate the key from `aws/spans` and any retained log groups, and wait for data encrypted with the key to expire. Cancel an unintended deletion with `aws kms cancel-key-deletion`.
 - Logs account-policy JSON and selection criteria are type-specific; `scope` currently accepts only `ALL`. The [current Logs API](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutAccountPolicy.html) lists `METRIC_EXTRACTION_POLICY` in addition to the four types in the [AWS provider v6.71 documentation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/r/cloudwatch_log_account_policy.html.markdown), so verify provider support before using that newer type. A subscription-filter policy can export account-wide logs; a data-protection policy can incur per-GB scanning charges. A metric-extraction policy can suppress Application Signals metrics if it includes `/aws/application-signals/data`.
 - Transaction Search includes indexing of 1% of ingested spans, but span ingestion is still billed; indexing above 1% can add cost. See [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html) and [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/). Enabling enrichment or other logging can also incur charges. A customer managed key adds a monthly key charge plus a charge for each request that CloudWatch Logs and X-Ray make to encrypt or decrypt data; see [AWS KMS pricing](https://aws.amazon.com/kms/pricing/).
 
@@ -235,8 +265,8 @@ will own; the nested lines are illustrative comments, not a second key.
 #     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
-#       type: "NONE" # (Required) NONE (no key at creation) or KMS.
-#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN, not an ID or alias; required for KMS.
+#       type: "KMS" # (Required) NONE (no key at creation) or KMS.
+#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
 #   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
 #     encryption: # (Optional) Trace encryption override; default null (module key when encryption.enabled, otherwise unmanaged).
 #       type: "KMS" # (Required) NONE or KMS.
@@ -273,7 +303,7 @@ will own; the nested lines are illustrative comments, not a second key.
 #     /app/checkout: # (Optional) Example log group.
 #       retention_in_days: 30 # (Optional) 0 (never expire), 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653; default null (never expire).
 #       log_group_class: "STANDARD" # (Optional) STANDARD, INFREQUENT_ACCESS or DELIVERY; default STANDARD; set at creation only, later changes are ignored.
-#       deletion_protection_enabled: false # (Optional) Block deletion until disabled; default false.
+#       deletion_protection_enabled: true # (Optional) Block deletion until set to false; default null (keeps the current setting; new log groups are unprotected).
 #       skip_destroy: false # (Optional) Keep the log group and its data on destroy; default false.
 #       encryption: # (Optional) Module key override; default null (module key when encryption.enabled).
 #         type: "KMS" # (Required) NONE (CloudWatch Logs default encryption) or KMS.
@@ -285,8 +315,8 @@ will own; the nested lines are illustrative comments, not a second key.
 #     deletion_window_in_days: 30 # (Optional) Key deletion waiting period, 7-30 days; default 30.
 #     rotation_period_in_days: 365 # (Optional) Rotation period (rotation is always on), 90-2560 days; default 365.
 #     iam_policy: # (Optional) Attachable key-use policy for roles that write or read encrypted data; default {}.
-#       name: "observability-encryption" # (Optional) 1-128 of A-Z a-z 0-9 +=,.@_-; default "<system_name>-observability-encryption".
-#       path: "/" # (Optional) IAM path that begins and ends with /; default "/".
+#       name: "observability-encryption" # (Optional) Account-wide name, 1-128 of A-Z a-z 0-9 +=,.@_-; default "<org unit>-<env name>-<env type>-<spoke>-<region>-observability-encryption".
+#       path: "/" # (Optional) IAM path up to 512 printable characters, no spaces, beginning and ending with /; default "/".
 ```
 
 The corrected non-hub scaffold renders this `terragrunt.hcl` structure.
@@ -442,7 +472,7 @@ Available targets:
 | ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.69.0, < 7.0.0 |
-| <a name="requirement_awscc"></a> [awscc](#requirement\_awscc) | >= 1.58.0, < 2.0.0 |
+| <a name="requirement_awscc"></a> [awscc](#requirement\_awscc) | >= 1.108.0, < 2.0.0 |
 
 ## Providers
 
@@ -483,7 +513,7 @@ Available targets:
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
-| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | Optional account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      indexing_percentage = number<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool, false)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
+| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | (Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      indexing_percentage = number<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
 | <a name="input_extra_tags"></a> [extra\_tags](#input\_extra\_tags) | Extra tags to add to the resources | `map(string)` | `{}` | no |
 | <a name="input_is_hub"></a> [is\_hub](#input\_is\_hub) | Is this a hub or spoke configuration? | `bool` | `false` | no |
 | <a name="input_org"></a> [org](#input\_org) | Organization details | <pre>object({<br/>    organization_name = string<br/>    organization_unit = string<br/>    environment_type  = string<br/>    environment_name  = string<br/>  })</pre> | n/a | yes |

@@ -77,7 +77,12 @@ resource "awscc_xray_transaction_search_config" "this" {
     ignore_changes = [cloudwatch_logs_configuration]
   }
 
-  depends_on = [aws_cloudwatch_log_resource_policy.transaction_search]
+  # Module log groups exist first, so a declared /aws/application-signals/data
+  # is created with its key before Transaction Search would create it unkeyed.
+  depends_on = [
+    aws_cloudwatch_log_resource_policy.transaction_search,
+    aws_cloudwatch_log_group.this
+  ]
 }
 
 # AWS manages separate X-Ray encryption, grouping and sampling controls. A

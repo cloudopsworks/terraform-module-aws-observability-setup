@@ -11,8 +11,8 @@
 #     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
-#       type: "NONE" # (Required) NONE (no key at creation) or KMS.
-#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN, not an ID or alias; required for KMS.
+#       type: "KMS" # (Required) NONE (no key at creation) or KMS.
+#       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
 #   xray: # (Optional) X-Ray encryption, groups, and sampling; default {}.
 #     encryption: # (Optional) Trace encryption override; default null (module key when encryption.enabled, otherwise unmanaged).
 #       type: "KMS" # (Required) NONE or KMS.
@@ -49,7 +49,7 @@
 #     /app/checkout: # (Optional) Example log group.
 #       retention_in_days: 30 # (Optional) 0 (never expire), 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653; default null (never expire).
 #       log_group_class: "STANDARD" # (Optional) STANDARD, INFREQUENT_ACCESS or DELIVERY; default STANDARD; set at creation only, later changes are ignored.
-#       deletion_protection_enabled: false # (Optional) Block deletion until disabled; default false.
+#       deletion_protection_enabled: true # (Optional) Block deletion until set to false; default null (keeps the current setting; new log groups are unprotected).
 #       skip_destroy: false # (Optional) Keep the log group and its data on destroy; default false.
 #       encryption: # (Optional) Module key override; default null (module key when encryption.enabled).
 #         type: "KMS" # (Required) NONE (CloudWatch Logs default encryption) or KMS.
@@ -61,22 +61,5 @@
 #     deletion_window_in_days: 30 # (Optional) Key deletion waiting period, 7-30 days; default 30.
 #     rotation_period_in_days: 365 # (Optional) Rotation period (rotation is always on), 90-2560 days; default 365.
 #     iam_policy: # (Optional) Attachable key-use policy for roles that write or read encrypted data; default {}.
-#       name: "observability-encryption" # (Optional) 1-128 of A-Z a-z 0-9 +=,.@_-; default "<system_name>-observability-encryption".
-#       path: "/" # (Optional) IAM path that begins and ends with /; default "/".
-# Required variables
-{{- range .requiredVariables }}
-{{- if ne .Name "org"}}
-# Description {{ .Description }} , Type: {{ .Type }}
-{{ .Name }}: {{ .DefaultValuePlaceholder }}
-{{- end }}
-
-{{- end }}
-# Optional variables
-{{- range .optionalVariables }}
-{{- if and (ne .Name "is_hub") (ne .Name "spoke_def") (ne .Name "extra_args") (ne .Name "extra_tags") (ne .Name "cloudwatch") }}
-# Description {{ .Description }} , Type: {{ .Type }}
-#{{ .Name }}: {{ .DefaultValue }}
-{{- end }}
-
-{{- end }}
-
+#       name: "observability-encryption" # (Optional) Account-wide name, 1-128 of A-Z a-z 0-9 +=,.@_-; default "<org unit>-<env name>-<env type>-<spoke>-<region>-observability-encryption".
+#       path: "/" # (Optional) IAM path up to 512 printable characters, no spaces, beginning and ending with /; default "/".

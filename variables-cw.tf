@@ -10,7 +10,7 @@
 # Account/Region singleton settings are opt-in. Import any setting that already
 # exists before enabling it here; two Terraform states must not own one setting.
 variable "cloudwatch" {
-  description = "Optional account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured."
+  description = "(Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}."
   type = object({
     application_signals = optional(object({
       enabled = optional(bool, false)
@@ -67,7 +67,7 @@ variable "cloudwatch" {
     log_groups = optional(map(object({
       retention_in_days           = optional(number)
       log_group_class             = optional(string, "STANDARD")
-      deletion_protection_enabled = optional(bool, false)
+      deletion_protection_enabled = optional(bool)
       skip_destroy                = optional(bool, false)
       encryption = optional(object({
         type   = string
@@ -100,11 +100,11 @@ variable "cloudwatch" {
   #     indexing_percentage: 1 # (Required) Percentage of traces indexed, 0-100; 1% is the included indexing tier.
   #     policy_name: "CloudWatchTransactionSearch" # (Optional) Account resource-policy name; default shown.
   #     spans_encryption: # (Optional) Local override of the aws/spans log group key; default null (module key when encryption.enabled). Applied only when Transaction Search is first enabled; later changes are ignored.
-  #       type: "NONE" # (Required) NONE (no key at creation) or KMS.
-  #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN (not a key ID or alias); required when type is KMS.
+  #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
+  #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN (not a key ID or alias) in this account and Region; required when type is KMS.
   #   xray: # (Optional) X-Ray settings; default {}.
   #     encryption: # (Optional) Local override of trace encryption; default null (module key when encryption.enabled, otherwise unmanaged).
-  #       type: "NONE" # (Required) Valid values: NONE or KMS.
+  #       type: "KMS" # (Required) Valid values: NONE or KMS.
   #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) CMK ARN; required when type is KMS.
   #     groups: # (Optional) Map keyed by X-Ray group name; default {}.
   #       checkout: # (Optional) Example group.
@@ -138,7 +138,7 @@ variable "cloudwatch" {
   #     /app/checkout: # (Optional) Example log group.
   #       retention_in_days: 30 # (Optional) 0 (never expire), 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653; default null (never expire).
   #       log_group_class: "STANDARD" # (Optional) STANDARD, INFREQUENT_ACCESS or DELIVERY; default STANDARD; set at creation only, later changes are ignored.
-  #       deletion_protection_enabled: false # (Optional) Block log group deletion until disabled; default false.
+  #       deletion_protection_enabled: true # (Optional) Block log group deletion until set to false; default null (keeps the current setting; new log groups are unprotected).
   #       skip_destroy: false # (Optional) Keep the log group and its data on destroy; default false.
   #       encryption: # (Optional) Local override of the module key; default null (module key when encryption.enabled).
   #         type: "KMS" # (Required) NONE (CloudWatch Logs default encryption) or KMS.
@@ -150,8 +150,8 @@ variable "cloudwatch" {
   #     deletion_window_in_days: 30 # (Optional) Key deletion waiting period, 7-30 days; default 30.
   #     rotation_period_in_days: 365 # (Optional) Automatic key rotation period (rotation is always on), 90-2560 days; default 365.
   #     iam_policy: # (Optional) Attachable policy granting key use through CloudWatch Logs and X-Ray; default {}.
-  #       name: "observability-encryption" # (Optional) Policy name, 1-128 of A-Z a-z 0-9 +=,.@_-; default "<system_name>-observability-encryption".
-  #       path: "/" # (Optional) IAM path, must begin and end with /; default "/".
+  #       name: "observability-encryption" # (Optional) Account-wide policy name, 1-128 of A-Z a-z 0-9 +=,.@_-; default "<org unit>-<env name>-<env type>-<spoke>-<region>-observability-encryption".
+  #       path: "/" # (Optional) IAM path, up to 512 printable ASCII characters, beginning and ending with /; default "/".
 
   validation {
     condition = (
@@ -184,7 +184,7 @@ variable "cloudwatch" {
     condition = (
       var.cloudwatch.transaction_search == null ? true :
       var.cloudwatch.transaction_search.spans_encryption == null ? true :
-      (contains(["NONE", "KMS"], var.cloudwatch.transaction_search.spans_encryption.type) &&
+      (contains(["NONE", "KMS"], coalesce(var.cloudwatch.transaction_search.spans_encryption.type, "-")) &&
       (var.cloudwatch.transaction_search.spans_encryption.type == "KMS") == (var.cloudwatch.transaction_search.spans_encryption.key_id != null))
     )
     error_message = "transaction_search.spans_encryption.type must be NONE or KMS, and key_id must be supplied only when type is KMS."
@@ -203,7 +203,7 @@ variable "cloudwatch" {
   validation {
     condition = (
       var.cloudwatch.xray.encryption == null ? true :
-      contains(["NONE", "KMS"], var.cloudwatch.xray.encryption.type)
+      contains(["NONE", "KMS"], coalesce(var.cloudwatch.xray.encryption.type, "-"))
     )
     error_message = "xray.encryption.type must be NONE or KMS."
   }
@@ -270,7 +270,7 @@ variable "cloudwatch" {
     condition = alltrue([
       for group in values(var.cloudwatch.log_groups) :
       group.encryption == null ? true :
-      (contains(["NONE", "KMS"], group.encryption.type) &&
+      (contains(["NONE", "KMS"], coalesce(group.encryption.type, "-")) &&
       (group.encryption.type == "KMS") == (group.encryption.key_id != null))
     ])
     error_message = "log_groups encryption.type must be NONE or KMS, and encryption.key_id must be supplied only when type is KMS."
@@ -310,9 +310,8 @@ variable "cloudwatch" {
     condition = (
       (var.cloudwatch.encryption.iam_policy.name == null ? true :
       can(regex("^[A-Za-z0-9+=,.@_-]{1,128}$", var.cloudwatch.encryption.iam_policy.name))) &&
-      startswith(var.cloudwatch.encryption.iam_policy.path, "/") &&
-      endswith(var.cloudwatch.encryption.iam_policy.path, "/")
+      can(regex("^/([!-~]{1,510}/)?$", var.cloudwatch.encryption.iam_policy.path))
     )
-    error_message = "encryption.iam_policy.name must be 1-128 characters of A-Z, a-z, 0-9 or +=,.@_-, and encryption.iam_policy.path must begin and end with '/'."
+    error_message = "encryption.iam_policy.name must be 1-128 characters of A-Z, a-z, 0-9 or +=,.@_-, and encryption.iam_policy.path must be up to 512 printable ASCII characters without spaces, beginning and ending with '/'."
   }
 }

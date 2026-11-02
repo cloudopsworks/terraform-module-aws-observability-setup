@@ -25,6 +25,17 @@ locals {
     var.cloudwatch.transaction_search.spans_encryption == null ? local.encryption_key_arn :
     var.cloudwatch.transaction_search.spans_encryption.key_id
   )
+
+  # IAM policy names are account-wide, but the boilerplate Region code is not
+  # unique (ap-south-1 and ap-southeast-1 both shorten to apso1), so the default
+  # name uses the full Region name.
+  encryption_policy_name = coalesce(
+    var.cloudwatch.encryption.iam_policy.name,
+    format("%s-%s-%s-%s-%s-observability-encryption",
+      lower(var.org.organization_unit), lower(var.org.environment_name),
+      lower(var.org.environment_type), var.spoke_def, data.aws_region.current.region
+    )
+  )
 }
 
 # Symmetric key shared by module log groups, X-Ray traces and the Transaction
@@ -86,12 +97,14 @@ resource "aws_kms_alias" "this" {
 
 # Attachable policy for roles that write to or read from data encrypted with
 # the module key. CloudWatch Logs requires caller-side key access through
-# kms:ViaService; X-Ray readers need kms:Decrypt. The description is static
-# because changing it replaces the policy, which fails while it is attached.
+# kms:ViaService. X-Ray encrypts through the grant created when its encryption
+# is configured, so trace writers need nothing and readers need kms:Decrypt.
+# The description is static because changing it replaces the policy, which
+# fails while it is attached.
 resource "aws_iam_policy" "encryption" {
   count = local.encryption_enabled ? 1 : 0
 
-  name        = coalesce(var.cloudwatch.encryption.iam_policy.name, format("%s-observability-encryption", local.system_name))
+  name        = local.encryption_policy_name
   path        = var.cloudwatch.encryption.iam_policy.path
   description = "Use of the observability KMS key through CloudWatch Logs and AWS X-Ray for encrypted log and trace delivery."
   policy = jsonencode({
@@ -115,13 +128,9 @@ resource "aws_iam_policy" "encryption" {
         }
       },
       {
-        Sid    = "UseKeyThroughXRay"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
+        Sid      = "ReadTracesThroughXRay"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
         Resource = aws_kms_key.this[0].arn
         Condition = {
           StringEquals = {
