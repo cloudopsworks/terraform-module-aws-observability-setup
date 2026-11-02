@@ -16,7 +16,7 @@ locals {
   # Decided from configuration rather than the key ARN so the plan shape stays
   # known before the key exists.
   transaction_search_spans_encrypted = (
-    var.cloudwatch.transaction_search == null ? false :
+    !local.transaction_search_enabled ? false :
     var.cloudwatch.transaction_search.spans_encryption == null ? local.encryption_enabled :
     var.cloudwatch.transaction_search.spans_encryption.type == "KMS"
   )

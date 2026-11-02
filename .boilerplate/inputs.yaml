@@ -2,14 +2,17 @@
 # Optional CloudWatch account/Region settings (all disabled when omitted).
 #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
 #   application_signals: # (Optional) Discovery/grouping settings; default {}.
-#     enabled: true # (Optional) Default false.
+#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while transaction_search is enabled.
+#     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
 #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
 #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
 #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
 #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
-#   transaction_search: # (Optional) X-Ray Transaction Search; default null.
-#     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+#   transaction_search: # (Optional) X-Ray Transaction Search; also turns on Application Signals discovery; default null (disabled); use {} for all defaults (an empty key is null).
+#     enabled: true # (Optional) Default true when this block is set.
+#     indexing_percentage: 1 # (Optional) Percent of spans indexed, 0-100; default 1 (the included indexing tier).
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before enabled: false; match indexing_percentage to the current value.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
 #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
 #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.

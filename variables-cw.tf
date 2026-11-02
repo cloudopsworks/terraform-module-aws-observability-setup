@@ -8,12 +8,14 @@
 #
 
 # Account/Region singleton settings are opt-in. Import any setting that already
-# exists before enabling it here; two Terraform states must not own one setting.
+# exists (import_existing for discovery and Transaction Search) before enabling
+# it here; two Terraform states must not own one setting.
 variable "cloudwatch" {
   description = "(Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}."
   type = object({
     application_signals = optional(object({
-      enabled = optional(bool, false)
+      enabled         = optional(bool, false)
+      import_existing = optional(bool, false)
       grouping_attributes = optional(list(object({
         grouping_name          = string
         grouping_source_keys   = list(string)
@@ -21,8 +23,10 @@ variable "cloudwatch" {
       })), [])
     }), {})
     transaction_search = optional(object({
-      indexing_percentage = number
+      enabled             = optional(bool, true)
+      indexing_percentage = optional(number, 1)
       policy_name         = optional(string, "CloudWatchTransactionSearch")
+      import_existing     = optional(bool, false)
       spans_encryption = optional(object({
         type   = string
         key_id = optional(string)
@@ -91,14 +95,17 @@ variable "cloudwatch" {
 
   # cloudwatch: # (Optional) Account/Region settings; default {} manages nothing.
   #   application_signals: # (Optional) Application Signals settings; default {}.
-  #     enabled: true # (Optional) Enable discovery; default false.
+  #     enabled: true # (Optional) Enable discovery, which creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role; default false. Forced on while transaction_search is enabled.
+  #     import_existing: false # (Optional) Import discovery already enabled in this account (for example from the console or by an earlier Transaction Search enablement) instead of creating it; default false. Fails when discovery does not exist; ignored while discovery is not managed, and can stay set because discovery cannot be stopped.
   #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
   #       - grouping_name: "Environment" # (Required) Attribute display name, 1-128 characters.
   #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty source-key list.
   #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters.
-  #   transaction_search: # (Optional) Enable X-Ray Transaction Search; default null.
-  #     indexing_percentage: 1 # (Required) Percentage of traces indexed, 0-100; 1% is the included indexing tier.
+  #   transaction_search: # (Optional) X-Ray Transaction Search, which also turns on Application Signals discovery; default null (disabled). Use transaction_search: {} to accept all defaults; an empty key is null.
+  #     enabled: true # (Optional) Enable Transaction Search when this block is set; default true.
+  #     indexing_percentage: 1 # (Optional) Percentage of spans indexed, 0-100; default 1 (the included indexing tier).
   #     policy_name: "CloudWatchTransactionSearch" # (Optional) Account resource-policy name; default shown.
+  #     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false. Fails when it is not enabled; clear it before setting enabled to false. Set indexing_percentage to the current value or the import also changes it.
   #     spans_encryption: # (Optional) Local override of the aws/spans log group key; default null (module key when encryption.enabled). Applied only when Transaction Search is first enabled; later changes are ignored.
   #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
   #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN (not a key ID or alias) in this account and Region; required when type is KMS.
@@ -156,9 +163,18 @@ variable "cloudwatch" {
   validation {
     condition = (
       length(var.cloudwatch.application_signals.grouping_attributes) == 0 ||
-      var.cloudwatch.application_signals.enabled
+      var.cloudwatch.application_signals.enabled ||
+      (var.cloudwatch.transaction_search == null ? false : var.cloudwatch.transaction_search.enabled)
     )
-    error_message = "application_signals.enabled must be true when grouping_attributes are set."
+    error_message = "application_signals.enabled or transaction_search.enabled must be true when grouping_attributes are set."
+  }
+
+  validation {
+    condition = (
+      var.cloudwatch.transaction_search == null ? true :
+      !var.cloudwatch.transaction_search.import_existing || var.cloudwatch.transaction_search.enabled
+    )
+    error_message = "transaction_search.import_existing requires transaction_search.enabled."
   }
 
   validation {

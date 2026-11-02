@@ -61,8 +61,8 @@ failing safely.
 
 | Capability | Terraform ownership | Input |
 | --- | --- | --- |
-| Application Signals discovery and grouping | `awscc_applicationsignals_discovery`, `awscc_applicationsignals_grouping_configuration` | `cloudwatch.application_signals` |
-| X-Ray Transaction Search | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.transaction_search` |
+| Application Signals discovery (creates the `AWSServiceRoleForCloudWatchApplicationSignals` service-linked role) and grouping | `awscc_applicationsignals_discovery`, `awscc_applicationsignals_grouping_configuration` | `cloudwatch.application_signals` |
+| X-Ray Transaction Search, which also turns on Application Signals discovery | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.transaction_search` |
 | X-Ray trace encryption, groups, sampling | `aws_xray_encryption_config`, `aws_xray_group`, `aws_xray_sampling_rule` | `cloudwatch.xray` |
 | Account telemetry inventory and tag enrichment | `aws_observabilityadmin_telemetry_evaluation`, `aws_observabilityadmin_telemetry_enrichment` | `cloudwatch.telemetry` |
 | CloudWatch Logs account policies | `aws_cloudwatch_log_account_policy` | `cloudwatch.log_account_policies` |
@@ -78,11 +78,51 @@ the scoped Logs resource policy for `aws/spans` and
 [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search-Cloudformation.html)
 and [the configuration reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-xray-transactionsearchconfig.html).
 
-Application Signals discovery enables account integration; it does not install
-collectors or instrument workloads. Grouping owns one whole-account
-configuration. Existing discovery requires import, not blind recreation;
-older discovery may require a separate Application Map migration. See
+Application Signals discovery enables account integration and creates the
+`AWSServiceRoleForCloudWatchApplicationSignals` service-linked role; it does
+not install collectors or instrument workloads. Grouping owns one
+whole-account configuration. Older discovery may require a separate
+Application Map migration. See
 [Application Signals discovery](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-applicationsignals-discovery.html).
+
+**Transaction Search and Application Signals**
+
+A `transaction_search` block enables Transaction Search (`enabled` defaults
+to `true`, `indexing_percentage` to `1`) and also turns on Application
+Signals discovery, so the service-linked role exists and Application Signals
+can use the spans. AWS starts discovery whenever it enables Transaction
+Search, so the module manages discovery whenever either
+`application_signals.enabled` or `transaction_search.enabled` is `true`, and
+creates discovery first. Set `transaction_search.enabled: false` to turn
+Transaction Search off while keeping its settings in `inputs.yaml`.
+
+| Turning off | Effect in AWS |
+| --- | --- |
+| `transaction_search` | X-Ray stops sending spans to CloudWatch Logs. `aws/spans` and its data remain. |
+| Discovery (both flags `false`) | The resource leaves state. Application Signals has no operation that stops discovery, so the account stays enabled and the service-linked role remains. Re-enabling later needs `application_signals.import_existing: true`; once discovery has ever been on, that flag can stay set permanently. |
+
+**Adopting existing settings (`import_existing`)**
+
+Discovery and Transaction Search are account singletons. Their create fails
+when they are already enabled, for example from the console, an earlier
+Transaction Search enablement, or another stack (AWS asks that
+[Transaction Search be disabled](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search-Cloudformation.html)
+before infrastructure as code enables it). Set `import_existing: true` on the
+setting instead, and the module imports it by account ID on the next plan:
+
+| Already enabled in the account | Set |
+| --- | --- |
+| Application Signals discovery | `application_signals.import_existing: true` |
+| Transaction Search (discovery is almost always on too) | `transaction_search.import_existing: true` and `application_signals.import_existing: true` |
+
+- The plan shows `will be imported`. Once imported, the flag is a no-op and can stay set. Clear `transaction_search.import_existing` before setting `transaction_search.enabled: false`, because a later re-enable would otherwise try to import a disabled setting.
+- Set `indexing_percentage` to the account's current value (`aws xray get-indexing-rules`) before importing; otherwise the same apply also changes it. Read the update lines in the plan, not only `will be imported`.
+- Set both flags when Transaction Search is already on. With only `transaction_search.import_existing`, the discovery create fails as already existing and the Transaction Search import is not saved until both are set.
+- Set a flag only when the setting exists: importing a setting that is not enabled fails the plan with `Cannot import non-existent remote object`. Check with `aws xray get-trace-segment-destination` (`Destination: CloudWatchLogs` means Transaction Search is enabled) and `aws iam get-role --role-name AWSServiceRoleForCloudWatchApplicationSignals` (the role exists once discovery has been started).
+- An imported Transaction Search keeps its current `aws/spans` encryption; `spans_encryption` and the module key apply only when this state first enables it.
+- The module's Logs resource policy (`policy_name`) is written with a create-or-update API and does not need importing. The console may have created a second, differently named policy; remove it only after confirming this module's policy is in place.
+- Import blocks require Terraform or OpenTofu `>= 1.7` and work only in a root module. Terragrunt deploys this module as the root module; calling it with a `module` block from another configuration is not supported.
+- Destroying an adopted Transaction Search turns it off, as for one the module created.
 
 **Encryption**
 
@@ -169,8 +209,9 @@ Data Firehose and keeps events for a fixed, short period.
 
 **Prerequisites and limits**
 
-- Terraform `>= 1.3`, AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
-- Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Some settings create service-linked roles.
+- Terraform or OpenTofu `>= 1.7` (for conditional `import` blocks), AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
+- Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Discovery and Transaction Search create the Application Signals service-linked role, so the caller needs `iam:CreateServiceLinkedRole` and `application-signals:StartDiscovery`.
+- **Upgrading from v1.0.0:** the module now needs Terraform or OpenTofu `>= 1.7` and must be the root module (as under Terragrunt). With `transaction_search` set and `application_signals.enabled: false`: the next plan adds discovery, which AWS already enabled with Transaction Search. Set `application_signals.import_existing: true` for that apply so discovery is imported instead of failing to create.
 - Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
 - X-Ray `encryption` configures traces, **not** the CloudWatch Logs `aws/spans` group; `aws/spans` follows `transaction_search.spans_encryption` as described in **Encryption**. The AWS provider accepts only an ARN (key or alias ARN) for `xray.encryption.key_id`. Destroying `aws_xray_encryption_config` does not reset the service setting: apply `type: NONE` before removing the input if you intend to revert KMS encryption. See [X-Ray encryption config](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/xray_encryption_config).
 - With `encryption.enabled`, the deploying principal also needs permission to create and manage the KMS key, alias, and IAM policy; `kms:DescribeKey` on every key it associates with a log group or `aws/spans`; and `kms:CreateGrant` plus `kms:DescribeKey` on the key used for X-Ray. X-Ray stops storing traces if the principal that configured its encryption loses access to the key, so keep the deploying role's key permissions in place.
@@ -256,14 +297,17 @@ will own; the nested lines are illustrative comments, not a second key.
 ```yaml
 #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
 #   application_signals: # (Optional) Discovery/grouping settings; default {}.
-#     enabled: true # (Optional) Default false.
+#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while transaction_search is enabled.
+#     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
 #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
 #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
 #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
 #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
-#   transaction_search: # (Optional) X-Ray Transaction Search; default null.
-#     indexing_percentage: 1 # (Required) Percent of traces indexed, 0-100; 1% is the included indexing tier.
+#   transaction_search: # (Optional) X-Ray Transaction Search; also turns on Application Signals discovery; default null (disabled); use {} for all defaults (an empty key is null).
+#     enabled: true # (Optional) Default true when this block is set.
+#     indexing_percentage: 1 # (Optional) Percent of spans indexed, 0-100; default 1 (the included indexing tier).
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
+#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before enabled: false; match indexing_percentage to the current value.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
 #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
 #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
@@ -354,7 +398,7 @@ inputs = {
 
 1. Configure AWS credentials and matching `aws` and `awscc` providers in the calling root stack, as shown in **Usage**.
 2. Scaffold a deployment as shown in **Usage**; inspect `inputs.yaml` and `terragrunt.hcl`.
-3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time, importing pre-existing singleton settings first.
+3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time. For discovery or Transaction Search already enabled in the account, set that setting's `import_existing: true`.
 4. To encrypt, set `encryption.enabled: true` and attach the `encryption_policy_arn` output to every role that writes to or reads from encrypted log groups.
 5. Run `terragrunt plan`, review account/Region changes and potential charges, then apply.
 
@@ -363,19 +407,33 @@ inputs = {
 
 ### Application Signals and Transaction Search
 
-Put this in `inputs.yaml` to enable discovery, account grouping, and 1%
-indexing. Import any existing singleton before enabling it here.
+Put this in `inputs.yaml` to enable Transaction Search with 1% indexing,
+which also turns on discovery, and to set account grouping.
 
 ```yaml
 cloudwatch:
   application_signals:
-    enabled: true
     grouping_attributes:
       - grouping_name: Environment
         grouping_source_keys: [deployment.environment]
         default_grouping_value: unknown
   transaction_search:
     indexing_percentage: 1
+```
+
+### Adopting settings enabled from the console
+
+When Transaction Search and Application Signals are already on in the
+account, import them instead of creating them. Keep the flags after the
+first apply; they are no-ops once the settings are in state.
+
+```yaml
+cloudwatch:
+  application_signals:
+    import_existing: true
+  transaction_search:
+    indexing_percentage: 5
+    import_existing: true
 ```
 
 ### X-Ray encryption, grouping, and sampling
@@ -470,7 +528,7 @@ Available targets:
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.69.0, < 7.0.0 |
 | <a name="requirement_awscc"></a> [awscc](#requirement\_awscc) | >= 1.108.0, < 2.0.0 |
 
@@ -513,7 +571,7 @@ Available targets:
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
-| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | (Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      indexing_percentage = number<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
+| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | (Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled         = optional(bool, false)<br/>      import_existing = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      enabled             = optional(bool, true)<br/>      indexing_percentage = optional(number, 1)<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      import_existing     = optional(bool, false)<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
 | <a name="input_extra_tags"></a> [extra\_tags](#input\_extra\_tags) | Extra tags to add to the resources | `map(string)` | `{}` | no |
 | <a name="input_is_hub"></a> [is\_hub](#input\_is\_hub) | Is this a hub or spoke configuration? | `bool` | `false` | no |
 | <a name="input_org"></a> [org](#input\_org) | Organization details | <pre>object({<br/>    organization_name = string<br/>    organization_unit = string<br/>    environment_type  = string<br/>    environment_name  = string<br/>  })</pre> | n/a | yes |

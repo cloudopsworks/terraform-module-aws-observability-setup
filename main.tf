@@ -11,9 +11,39 @@ data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
 
-# AWSCC owns the Application Signals account discovery singleton.
+locals {
+  transaction_search_enabled = (
+    var.cloudwatch.transaction_search == null ? false : var.cloudwatch.transaction_search.enabled
+  )
+  # Enabling Transaction Search also starts Application Signals discovery in
+  # AWS, so the module manages discovery whenever either setting is enabled.
+  application_signals_enabled = var.cloudwatch.application_signals.enabled || local.transaction_search_enabled
+  application_signals_import  = local.application_signals_enabled && var.cloudwatch.application_signals.import_existing
+  transaction_search_import   = local.transaction_search_enabled ? var.cloudwatch.transaction_search.import_existing : false
+}
+
+# AWSCC owns the Application Signals account discovery singleton. Creating it
+# creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role.
 resource "awscc_applicationsignals_discovery" "this" {
-  count = var.cloudwatch.application_signals.enabled ? 1 : 0
+  count = local.application_signals_enabled ? 1 : 0
+}
+
+# Adopt singletons that already exist in the account, for example from the
+# console, instead of failing to create them. Import blocks are valid only in a
+# root module, which this module is when Terragrunt deploys it. Once imported,
+# the block is a no-op, so the flag can stay set.
+import {
+  for_each = local.application_signals_import ? { discovery = 0 } : {}
+
+  to = awscc_applicationsignals_discovery.this[each.value]
+  id = data.aws_caller_identity.current.account_id
+}
+
+import {
+  for_each = local.transaction_search_import ? { transaction_search = 0 } : {}
+
+  to = awscc_xray_transaction_search_config.this[each.value]
+  id = data.aws_caller_identity.current.account_id
 }
 
 resource "awscc_applicationsignals_grouping_configuration" "this" {
@@ -34,7 +64,7 @@ resource "awscc_applicationsignals_grouping_configuration" "this" {
 # Search is enabled. AWSCC owns indexing/destination; do not also manage the
 # overlapping aws_xray_indexing_rule or aws_xray_trace_segment_destination.
 resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
-  count = var.cloudwatch.transaction_search == null ? 0 : 1
+  count = local.transaction_search_enabled ? 1 : 0
 
   policy_name = var.cloudwatch.transaction_search.policy_name
   policy_document = jsonencode({
@@ -63,7 +93,7 @@ resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
 }
 
 resource "awscc_xray_transaction_search_config" "this" {
-  count = var.cloudwatch.transaction_search == null ? 0 : 1
+  count = local.transaction_search_enabled ? 1 : 0
 
   indexing_percentage = var.cloudwatch.transaction_search.indexing_percentage
   cloudwatch_logs_configuration = local.transaction_search_spans_encrypted ? {
@@ -79,9 +109,12 @@ resource "awscc_xray_transaction_search_config" "this" {
 
   # Module log groups exist first, so a declared /aws/application-signals/data
   # is created with its key before Transaction Search would create it unkeyed.
+  # Discovery is created first because this resource also starts discovery,
+  # which would make a later discovery create fail as already existing.
   depends_on = [
     aws_cloudwatch_log_resource_policy.transaction_search,
-    aws_cloudwatch_log_group.this
+    aws_cloudwatch_log_group.this,
+    awscc_applicationsignals_discovery.this
   ]
 }
 
