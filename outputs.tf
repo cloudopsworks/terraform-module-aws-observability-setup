@@ -42,14 +42,16 @@ output "xray_sampling_rule_arns" {
   value       = { for name, rule in aws_xray_sampling_rule.this : name => rule.arn }
 }
 
+# The AWS provider deprecates id on these per-Region singletons in favor of
+# region, which holds the same value.
 output "telemetry_evaluation_id" {
-  description = "Observability Admin account telemetry evaluation ID, or null when disabled."
-  value       = try(aws_observabilityadmin_telemetry_evaluation.this[0].id, null)
+  description = "Observability Admin account telemetry evaluation ID (its Region), or null when disabled."
+  value       = try(aws_observabilityadmin_telemetry_evaluation.this[0].region, null)
 }
 
 output "telemetry_enrichment_id" {
-  description = "Observability Admin resource-tag enrichment ID, or null when disabled."
-  value       = try(aws_observabilityadmin_telemetry_enrichment.this[0].id, null)
+  description = "Observability Admin resource-tag enrichment ID (its Region), or null when disabled."
+  value       = try(aws_observabilityadmin_telemetry_enrichment.this[0].region, null)
 }
 
 output "log_account_policy_ids" {

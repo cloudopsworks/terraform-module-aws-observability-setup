@@ -531,8 +531,8 @@ Available targets:
 | <a name="output_kms_key_id"></a> [kms\_key\_id](#output\_kms\_key\_id) | ID of the module KMS key, or null when encryption is disabled. |
 | <a name="output_log_account_policy_ids"></a> [log\_account\_policy\_ids](#output\_log\_account\_policy\_ids) | CloudWatch Logs account policy IDs created by this module, keyed by policy name. |
 | <a name="output_log_group_arns"></a> [log\_group\_arns](#output\_log\_group\_arns) | ARNs of CloudWatch Logs log groups created by this module, keyed by log group name. |
-| <a name="output_telemetry_enrichment_id"></a> [telemetry\_enrichment\_id](#output\_telemetry\_enrichment\_id) | Observability Admin resource-tag enrichment ID, or null when disabled. |
-| <a name="output_telemetry_evaluation_id"></a> [telemetry\_evaluation\_id](#output\_telemetry\_evaluation\_id) | Observability Admin account telemetry evaluation ID, or null when disabled. |
+| <a name="output_telemetry_enrichment_id"></a> [telemetry\_enrichment\_id](#output\_telemetry\_enrichment\_id) | Observability Admin resource-tag enrichment ID (its Region), or null when disabled. |
+| <a name="output_telemetry_evaluation_id"></a> [telemetry\_evaluation\_id](#output\_telemetry\_evaluation\_id) | Observability Admin account telemetry evaluation ID (its Region), or null when disabled. |
 | <a name="output_transaction_search_id"></a> [transaction\_search\_id](#output\_transaction\_search\_id) | X-Ray Transaction Search account configuration ID, or null when disabled. |
 | <a name="output_transaction_search_log_policy_id"></a> [transaction\_search\_log\_policy\_id](#output\_transaction\_search\_log\_policy\_id) | CloudWatch Logs resource policy ID that permits X-Ray Transaction Search log writes, or null when disabled. |
 | <a name="output_xray_encryption_config_id"></a> [xray\_encryption\_config\_id](#output\_xray\_encryption\_config\_id) | X-Ray encryption configuration ID, or null when unmanaged. |
