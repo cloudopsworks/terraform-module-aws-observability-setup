@@ -98,8 +98,8 @@ variable "cloudwatch" {
   # cloudwatch: # (Optional) Account/Region settings; default {} manages nothing.
   #   application_signals: # (Optional) Application Signals settings; default {}.
   #     enabled: true # (Optional) Enable discovery, which creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role; default false. Forced on while spans are ingested.
-  #     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": X-Ray sends spans to the CloudWatch Logs aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set). transaction_search.enabled wins when set and must not disagree.
-  #     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percentage of ingested spans indexed as trace summaries, 0-100; default null (1, the included tier). Exclusive with transaction_search.indexing_percentage.
+  #     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": X-Ray sends spans to the CloudWatch Logs aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set). Same setting as transaction_search.enabled; setting both to different values is rejected.
+  #     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percentage of ingested spans indexed as trace summaries, 0-100; default null (1, the included tier). Exclusive with transaction_search.indexing_percentage; requires ingest_otel_spans or a transaction_search block.
   #     import_existing: false # (Optional) Import discovery already enabled in this account (for example from the console or by an earlier Transaction Search enablement) instead of creating it; default false. Fails when discovery does not exist; ignored while discovery is not managed, and can stay set because discovery cannot be stopped.
   #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
   #       - grouping_name: "Environment" # (Required) Attribute display name, 1-128 characters.
@@ -193,7 +193,7 @@ variable "cloudwatch" {
   validation {
     condition = (
       var.cloudwatch.transaction_search == null ? true :
-      !var.cloudwatch.transaction_search.import_existing || coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
+      !var.cloudwatch.transaction_search.import_existing || coalesce(var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, true)
     )
     error_message = "transaction_search.import_existing requires span ingestion to be on."
   }
@@ -210,10 +210,18 @@ variable "cloudwatch" {
 
   validation {
     condition = (
-      coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage, var.cloudwatch.application_signals.trace_indexing_rate, 1) >= 0 &&
-      coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage, var.cloudwatch.application_signals.trace_indexing_rate, 1) <= 100
+      alltrue([for rate in [coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage, var.cloudwatch.application_signals.trace_indexing_rate, 1)] : rate >= 0 && rate <= 100])
     )
     error_message = "The indexing rate (trace_indexing_rate or indexing_percentage) must be between 0 and 100."
+  }
+
+  validation {
+    condition = (
+      var.cloudwatch.application_signals.trace_indexing_rate == null ||
+      var.cloudwatch.application_signals.ingest_otel_spans != null ||
+      var.cloudwatch.transaction_search != null
+    )
+    error_message = "application_signals.trace_indexing_rate has no effect unless span ingestion is configured; set application_signals.ingest_otel_spans."
   }
 
   validation {

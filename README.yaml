@@ -86,7 +86,7 @@ introduction: |-
 
   | Turning off | Effect in AWS |
   | --- | --- |
-  | Span ingestion (`ingest_otel_spans: false`) | X-Ray stops sending spans to CloudWatch Logs. `aws/spans` and its data remain. |
+  | Span ingestion (`ingest_otel_spans: false`, `transaction_search.enabled: false`, or removing the `transaction_search` block when `ingest_otel_spans` is unset) | X-Ray stops sending spans to CloudWatch Logs. `aws/spans` and its data remain. |
   | Discovery (both flags `false`) | The resource leaves state. Application Signals has no operation that stops discovery, so the account stays enabled and the service-linked role remains. Re-enabling later needs `application_signals.import_existing: true`; once discovery has ever been on, that flag can stay set permanently. |
 
   **Adopting existing settings (`import_existing`)**
@@ -281,7 +281,7 @@ usage: |-
   #   application_signals: # (Optional) Discovery/grouping settings; default {}.
   #     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while spans are ingested.
   #     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": send X-Ray spans to the aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set).
-  #     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percent of ingested spans indexed, 0-100; default null (1, the included tier); exclusive with transaction_search.indexing_percentage.
+  #     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percent of ingested spans indexed, 0-100; default null (1, the included tier); exclusive with transaction_search.indexing_percentage; needs ingest_otel_spans or a transaction_search block.
   #     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
   #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
   #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.

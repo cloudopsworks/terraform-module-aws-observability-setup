@@ -13,8 +13,11 @@ data "aws_partition" "current" {}
 
 locals {
   # Span ingestion (console "Ingest OpenTelemetry spans") is Transaction
-  # Search. transaction_search.enabled wins, then ingest_otel_spans; a bare
-  # transaction_search block still enables it as in v1.0.0.
+  # Search, set by transaction_search.enabled or ingest_otel_spans (they must agree); a bare
+  # transaction_search block still enables it as in v1.0.0. Validations in
+  # variables-cw.tf repeat these ingestion and rate rules (they cannot read
+  # locals), and the policy-name fallback repeats the type default; keep them
+  # in sync.
   transaction_search_enabled = coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
   transaction_search_indexing_percentage = coalesce(
     var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage,
