@@ -197,7 +197,7 @@ introduction: |-
 
   **Prerequisites and limits**
 
-  - Terraform or OpenTofu `>= 1.7` (for conditional `import` blocks), AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Both providers must target the same account and Region: the scaffolded `terragrunt.hcl` generates the `awscc` provider from the root `region` and `sts_role_arn` locals (see **Usage**); do not let AWSCC fall back to different ambient credentials.
+  - Terraform or OpenTofu `>= 1.7` (for conditional `import` blocks), AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Both providers must target the same account and Region: the scaffolded `terragrunt.hcl` generates the `awscc` provider from the same Region and STS role inputs the root uses (see **Usage**); do not let AWSCC fall back to different ambient credentials.
   - Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Discovery and Transaction Search create the Application Signals service-linked role, so the caller needs `iam:CreateServiceLinkedRole` and `application-signals:StartDiscovery`.
   - **Upgrading from v1.0.0:** the module now needs Terraform or OpenTofu `>= 1.7` and must be the root module (as under Terragrunt). With `transaction_search` set and `application_signals.enabled: false`: the next plan adds discovery, which AWS already enabled with Transaction Search. Set `application_signals.import_existing: true` for that apply so discovery is imported instead of failing to create.
   - Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
@@ -217,8 +217,8 @@ usage: |-
   `inputs.yaml`, and `local-tags.json` into the current directory.
 
   ```sh
-  mkdir -p dev/us-east-1/shared/cloudwatch-observability
-  cd dev/us-east-1/shared/cloudwatch-observability
+  mkdir -p environments/dev/useast1/spoke-001/cloudwatch-observability
+  cd environments/dev/useast1/spoke-001/cloudwatch-observability
   terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-observability-setup
   vi inputs.yaml
   terragrunt plan
@@ -229,13 +229,29 @@ usage: |-
   Use a release (or tested pre-release) tag that contains these scaffold fixes;
   older published tags may still contain the prior template errors.
 
-  **Providers.** The parent `root.hcl` from the CloudOps Works Terragrunt
-  project template generates only the `aws` provider (`provider.g.tf`). The
-  scaffolded `terragrunt.hcl` includes that root with `expose = true` and
-  generates the matching `awscc` provider (`provider-awscc.g.tf`) from the
-  root's `region` and `sts_role_arn` locals, so both providers act on the
-  same account and Region. The root must define those two locals, as the
-  template's `root.hcl` does. Without a matching `awscc` provider, AWSCC uses
+  Scaffold asks for `is_hub` and `tags`, then stages the generated files with
+  `git add`. The Terragrunt hierarchy must provide these files in parent
+  directories, as in the CloudOps Works Terragrunt project template sample:
+
+  | File | Level | Used for |
+  | --- | --- | --- |
+  | `root.hcl` | Repository root | `aws` provider and remote state |
+  | `global-inputs.yaml`, `global-tags.json` | Repository root | `default.region` and `default.sts_role_arn` fallbacks, global tags |
+  | `env-inputs.yaml`, `env-tags.json` | Environment | `org` input, environment tags |
+  | `region-inputs.yaml`, `region-tags.json` | Region | `region` and optional `sts_role_arn`, Region tags |
+  | `spoke-inputs.yaml`, `spoke-tags.json` | Spoke | `spoke` (passed as `spoke_def`) and optional `sts_role_arn`, spoke tags |
+
+  Scaffold creates `local-tags.json`. Deploy one instance per account and
+  Region; the spoke that holds it is its single logical owner, not an AWS
+  isolation boundary. Review the plan before changing account-wide settings.
+
+  **Providers.** `root.hcl` generates only the `aws` provider. The scaffolded
+  `terragrunt.hcl` also generates the `awscc` provider (`provider_awscc.g.tf`)
+  with the Region and STS role resolved the same way as the root: `region`
+  from `region-inputs.yaml`, otherwise `global-inputs.yaml` `default.region`;
+  the role from `region-inputs.yaml`, then `spoke-inputs.yaml`, then
+  `global-inputs.yaml` `default.sts_role_arn`. Both providers therefore act on
+  the same account and Region. Without a matching `awscc` provider, AWSCC uses
   its own default credential chain, which shows up as `Cannot import
   non-existent remote object` on import or as a create that fails with
   `AlreadyExists`.
@@ -245,16 +261,11 @@ usage: |-
   - If the root assumes the role itself (`iam_role`, the template's
     assume-role-on-root option), remove `assume_role` from the generated
     `awscc` block, as the root `aws` provider has none either.
+  - If your root resolves the Region or role differently, change the
+    generated block to match it.
   - See the [AWS provider](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/index.html.markdown)
     and [AWSCC provider](https://github.com/hashicorp/terraform-provider-awscc/blob/v1.108.0/docs/index.md)
     configuration references.
-
-  The Terragrunt hierarchy must provide `root.hcl`, `env-inputs.yaml`,
-  `global-inputs.yaml`, and `global-tags.json` in parent directories. The
-  scaffold creates `local-tags.json`. The `shared` directory is the single
-  logical owner for this account/Region, not an AWS isolation boundary. Choose
-  non-hub scaffold mode for the example below. Review the plan before changing
-  account-wide settings.
 
   The generated `inputs.yaml` contains this module-specific key and annotated
   option tree as comments. There is only one `cloudwatch` key in the generated
@@ -333,35 +344,46 @@ usage: |-
   #       path: "/" # (Optional) IAM path up to 512 printable characters, no spaces, beginning and ending with /; default "/".
   ```
 
-  The corrected non-hub scaffold renders this `terragrunt.hcl` structure.
+  Scaffold renders this `terragrunt.hcl` (shown for `is_hub: false`).
   `terraform.source` is pinned to the release tag resolved by scaffold; replace
-  `vX.Y.Z` below with the tag containing these changes. The
-  `local.local_vars.cloudwatch` value maps to the module input.
+  `vX.Y.Z` below with that tag. The `local.local_vars.cloudwatch` value maps to
+  the module input.
 
   ```hcl
   locals {
     local_vars  = yamldecode(file("./inputs.yaml"))
+    spoke_vars  = yamldecode(file(find_in_parent_folders("spoke-inputs.yaml")))
+    region_vars = yamldecode(file(find_in_parent_folders("region-inputs.yaml")))
     env_vars    = yamldecode(file(find_in_parent_folders("env-inputs.yaml")))
     global_vars = yamldecode(file(find_in_parent_folders("global-inputs.yaml")))
-    global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
-    local_tags  = jsondecode(file("./local-tags.json"))
 
-    tags = merge(local.global_tags, local.local_tags)
+    local_tags  = jsondecode(file("./local-tags.json"))
+    spoke_tags  = jsondecode(file(find_in_parent_folders("spoke-tags.json")))
+    region_tags = jsondecode(file(find_in_parent_folders("region-tags.json")))
+    env_tags    = jsondecode(file(find_in_parent_folders("env-tags.json")))
+    global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
+
+    tags = merge(
+      local.global_tags,
+      local.env_tags,
+      local.region_tags,
+      local.spoke_tags,
+      local.local_tags
+    )
   }
 
   include "root" {
-    path   = find_in_parent_folders("root.hcl")
-    expose = true
+    path = find_in_parent_folders("root.hcl")
   }
 
   generate "provider_awscc" {
-    path      = "provider-awscc.g.tf"
+    path      = "provider_awscc.g.tf"
     if_exists = "overwrite_terragrunt"
     contents  = <<EOF
   provider "awscc" {
-    region = "${include.root.locals.region}"
+    region = "${try(local.region_vars.region, local.global_vars.default.region)}"
     assume_role = {
-      role_arn     = "${include.root.locals.sts_role_arn}"
+      role_arn     = "${try(local.region_vars.sts_role_arn, local.spoke_vars.sts_role_arn, local.global_vars.default.sts_role_arn)}"
       session_name = "terragrunt"
     }
   }
@@ -373,7 +395,9 @@ usage: |-
   }
 
   inputs = {
+    is_hub     = false
     org        = local.env_vars.org
+    spoke_def  = local.spoke_vars.spoke
     cloudwatch = try(local.local_vars.cloudwatch, {})
     extra_tags = local.tags
   }
@@ -489,7 +513,7 @@ examples: |-
   ```
 
 quickstart: |-
-  1. Configure AWS credentials and a parent `root.hcl` that generates the `aws` provider and defines the `region` and `sts_role_arn` locals; the scaffolded `terragrunt.hcl` generates the matching `awscc` provider (see **Usage**).
+  1. Configure AWS credentials and the Terragrunt hierarchy listed in **Usage** (`root.hcl` plus global, environment, Region, and spoke inputs and tags); the scaffolded `terragrunt.hcl` generates the `awscc` provider to match the root `aws` provider.
   2. Scaffold a deployment as shown in **Usage**; inspect `inputs.yaml` and `terragrunt.hcl`.
   3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time. For discovery or Transaction Search already enabled in the account, set that setting's `import_existing: true`.
   4. To encrypt, set `encryption.enabled: true` and attach the `encryption_policy_arn` output to every role that writes to or reads from encrypted log groups.
