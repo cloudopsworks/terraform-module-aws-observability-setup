@@ -56,3 +56,28 @@ output "log_account_policy_ids" {
   description = "CloudWatch Logs account policy IDs created by this module, keyed by policy name."
   value       = { for name, policy in aws_cloudwatch_log_account_policy.this : name => policy.id }
 }
+
+output "log_group_arns" {
+  description = "ARNs of CloudWatch Logs log groups created by this module, keyed by log group name."
+  value       = { for name, group in aws_cloudwatch_log_group.this : name => group.arn }
+}
+
+output "kms_key_arn" {
+  description = "ARN of the module KMS key for encrypted log groups and X-Ray data, or null when encryption is disabled."
+  value       = try(aws_kms_key.this[0].arn, null)
+}
+
+output "kms_key_id" {
+  description = "ID of the module KMS key, or null when encryption is disabled."
+  value       = try(aws_kms_key.this[0].key_id, null)
+}
+
+output "kms_alias_name" {
+  description = "Alias name of the module KMS key, or null when encryption is disabled."
+  value       = try(aws_kms_alias.this[0].name, null)
+}
+
+output "encryption_policy_arn" {
+  description = "ARN of the attachable IAM policy that lets a principal use the module KMS key through CloudWatch Logs and X-Ray, or null when encryption is disabled."
+  value       = try(aws_iam_policy.encryption[0].arn, null)
+}

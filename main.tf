@@ -66,16 +66,27 @@ resource "awscc_xray_transaction_search_config" "this" {
   count = var.cloudwatch.transaction_search == null ? 0 : 1
 
   indexing_percentage = var.cloudwatch.transaction_search.indexing_percentage
+  cloudwatch_logs_configuration = local.transaction_search_spans_encrypted ? {
+    spans_log_group_kms_key_id = local.transaction_search_spans_key_arn
+  } : null
+
+  lifecycle {
+    # X-Ray applies the spans key only when it first creates aws/spans, and
+    # changing it replaces this resource, which fails while Transaction Search
+    # is enabled. Re-key an existing aws/spans with AssociateKmsKey instead.
+    ignore_changes = [cloudwatch_logs_configuration]
+  }
 
   depends_on = [aws_cloudwatch_log_resource_policy.transaction_search]
 }
 
-# AWS manages separate X-Ray encryption, grouping and sampling controls.
+# AWS manages separate X-Ray encryption, grouping and sampling controls. A
+# local xray.encryption block wins; otherwise the module key applies.
 resource "aws_xray_encryption_config" "this" {
-  count = var.cloudwatch.xray.encryption == null ? 0 : 1
+  count = (var.cloudwatch.xray.encryption != null || local.encryption_enabled) ? 1 : 0
 
-  type   = var.cloudwatch.xray.encryption.type
-  key_id = var.cloudwatch.xray.encryption.key_id
+  type   = var.cloudwatch.xray.encryption == null ? "KMS" : var.cloudwatch.xray.encryption.type
+  key_id = var.cloudwatch.xray.encryption == null ? local.encryption_key_arn : var.cloudwatch.xray.encryption.key_id
 }
 
 resource "aws_xray_group" "this" {
@@ -130,5 +141,26 @@ resource "aws_cloudwatch_log_account_policy" "this" {
   policy_type        = each.value.policy_type
   scope              = each.value.scope
   selection_criteria = each.value.selection_criteria
+}
+
+# A local encryption block wins; otherwise the module key applies (null keeps
+# CloudWatch Logs default encryption when module encryption is disabled).
+resource "aws_cloudwatch_log_group" "this" {
+  for_each = var.cloudwatch.log_groups
+
+  name                        = each.key
+  retention_in_days           = each.value.retention_in_days
+  log_group_class             = each.value.log_group_class
+  deletion_protection_enabled = each.value.deletion_protection_enabled
+  skip_destroy                = each.value.skip_destroy
+  kms_key_id                  = each.value.encryption == null ? local.encryption_key_arn : each.value.encryption.key_id
+  tags                        = merge(local.all_tags, each.value.tags)
+
+  lifecycle {
+    # The class is fixed at creation, so any diff forces a replacement that
+    # deletes the log group and its data. AWS also starts returning ESSENTIALS
+    # for INFREQUENT_ACCESS in December 2026, which this provider does not map.
+    ignore_changes = [log_group_class]
+  }
 }
 
