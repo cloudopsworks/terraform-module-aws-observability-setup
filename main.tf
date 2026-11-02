@@ -12,14 +12,21 @@ data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 locals {
-  transaction_search_enabled = (
-    var.cloudwatch.transaction_search == null ? false : var.cloudwatch.transaction_search.enabled
+  # Span ingestion (console "Ingest OpenTelemetry spans") is Transaction
+  # Search. transaction_search.enabled wins, then ingest_otel_spans; a bare
+  # transaction_search block still enables it as in v1.0.0.
+  transaction_search_enabled = coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
+  transaction_search_indexing_percentage = coalesce(
+    var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage,
+    var.cloudwatch.application_signals.trace_indexing_rate,
+    1
   )
+  transaction_search_policy_name = var.cloudwatch.transaction_search == null ? "CloudWatchTransactionSearch" : var.cloudwatch.transaction_search.policy_name
   # Enabling Transaction Search also starts Application Signals discovery in
   # AWS, so the module manages discovery whenever either setting is enabled.
   application_signals_enabled = var.cloudwatch.application_signals.enabled || local.transaction_search_enabled
   application_signals_import  = local.application_signals_enabled && var.cloudwatch.application_signals.import_existing
-  transaction_search_import   = local.transaction_search_enabled ? var.cloudwatch.transaction_search.import_existing : false
+  transaction_search_import   = var.cloudwatch.transaction_search == null ? false : (local.transaction_search_enabled && var.cloudwatch.transaction_search.import_existing)
 }
 
 # AWSCC owns the Application Signals account discovery singleton. Creating it
@@ -66,7 +73,7 @@ resource "awscc_applicationsignals_grouping_configuration" "this" {
 resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
   count = local.transaction_search_enabled ? 1 : 0
 
-  policy_name = var.cloudwatch.transaction_search.policy_name
+  policy_name = local.transaction_search_policy_name
   policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -95,7 +102,7 @@ resource "aws_cloudwatch_log_resource_policy" "transaction_search" {
 resource "awscc_xray_transaction_search_config" "this" {
   count = local.transaction_search_enabled ? 1 : 0
 
-  indexing_percentage = var.cloudwatch.transaction_search.indexing_percentage
+  indexing_percentage = local.transaction_search_indexing_percentage
   cloudwatch_logs_configuration = local.transaction_search_spans_encrypted ? {
     spans_log_group_kms_key_id = local.transaction_search_spans_key_arn
   } : null

@@ -14,8 +14,10 @@ variable "cloudwatch" {
   description = "(Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}."
   type = object({
     application_signals = optional(object({
-      enabled         = optional(bool, false)
-      import_existing = optional(bool, false)
+      enabled             = optional(bool, false)
+      import_existing     = optional(bool, false)
+      ingest_otel_spans   = optional(bool)
+      trace_indexing_rate = optional(number)
       grouping_attributes = optional(list(object({
         grouping_name          = string
         grouping_source_keys   = list(string)
@@ -23,8 +25,8 @@ variable "cloudwatch" {
       })), [])
     }), {})
     transaction_search = optional(object({
-      enabled             = optional(bool, true)
-      indexing_percentage = optional(number, 1)
+      enabled             = optional(bool)
+      indexing_percentage = optional(number)
       policy_name         = optional(string, "CloudWatchTransactionSearch")
       import_existing     = optional(bool, false)
       spans_encryption = optional(object({
@@ -95,17 +97,19 @@ variable "cloudwatch" {
 
   # cloudwatch: # (Optional) Account/Region settings; default {} manages nothing.
   #   application_signals: # (Optional) Application Signals settings; default {}.
-  #     enabled: true # (Optional) Enable discovery, which creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role; default false. Forced on while transaction_search is enabled.
+  #     enabled: true # (Optional) Enable discovery, which creates the AWSServiceRoleForCloudWatchApplicationSignals service-linked role; default false. Forced on while spans are ingested.
+  #     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": X-Ray sends spans to the CloudWatch Logs aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set). transaction_search.enabled wins when set and must not disagree.
+  #     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percentage of ingested spans indexed as trace summaries, 0-100; default null (1, the included tier). Exclusive with transaction_search.indexing_percentage.
   #     import_existing: false # (Optional) Import discovery already enabled in this account (for example from the console or by an earlier Transaction Search enablement) instead of creating it; default false. Fails when discovery does not exist; ignored while discovery is not managed, and can stay set because discovery cannot be stopped.
   #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
   #       - grouping_name: "Environment" # (Required) Attribute display name, 1-128 characters.
   #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty source-key list.
   #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters.
-  #   transaction_search: # (Optional) X-Ray Transaction Search, which also turns on Application Signals discovery; default null (disabled). Use transaction_search: {} to accept all defaults; an empty key is null.
-  #     enabled: true # (Optional) Enable Transaction Search when this block is set; default true.
-  #     indexing_percentage: 1 # (Optional) Percentage of spans indexed, 0-100; default 1 (the included indexing tier).
+  #   transaction_search: # (Optional) Advanced Transaction Search settings; setting the block alone also enables span ingestion (v1.0.0 behaviour); default null. Use {} to accept all defaults; an empty key is null.
+  #     enabled: true # (Optional) Span ingestion switch, same setting as application_signals.ingest_otel_spans; default null (follows ingest_otel_spans, otherwise true when this block is set).
+  #     indexing_percentage: 1 # (Optional) Same setting as application_signals.trace_indexing_rate (set only one), 0-100; default null (1).
   #     policy_name: "CloudWatchTransactionSearch" # (Optional) Account resource-policy name; default shown.
-  #     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false. Fails when it is not enabled; clear it before setting enabled to false. Set indexing_percentage to the current value or the import also changes it.
+  #     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false. Fails when it is not enabled; clear it before turning ingestion off. Set the indexing rate to the current value or the import also changes it.
   #     spans_encryption: # (Optional) Local override of the aws/spans log group key; default null (module key when encryption.enabled). Applied only when Transaction Search is first enabled; later changes are ignored.
   #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
   #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN (not a key ID or alias) in this account and Region; required when type is KMS.
@@ -164,17 +168,34 @@ variable "cloudwatch" {
     condition = (
       length(var.cloudwatch.application_signals.grouping_attributes) == 0 ||
       var.cloudwatch.application_signals.enabled ||
-      (var.cloudwatch.transaction_search == null ? false : var.cloudwatch.transaction_search.enabled)
+      coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
     )
-    error_message = "application_signals.enabled or transaction_search.enabled must be true when grouping_attributes are set."
+    error_message = "application_signals.enabled or span ingestion must be on when grouping_attributes are set."
   }
 
   validation {
     condition = (
       var.cloudwatch.transaction_search == null ? true :
-      !var.cloudwatch.transaction_search.import_existing || var.cloudwatch.transaction_search.enabled
+      var.cloudwatch.transaction_search.enabled == null || var.cloudwatch.application_signals.ingest_otel_spans == null ? true :
+      var.cloudwatch.transaction_search.enabled == var.cloudwatch.application_signals.ingest_otel_spans
     )
-    error_message = "transaction_search.import_existing requires transaction_search.enabled."
+    error_message = "transaction_search.enabled and application_signals.ingest_otel_spans control the same setting and must not disagree; set only one."
+  }
+
+  validation {
+    condition = (
+      var.cloudwatch.transaction_search == null ? true :
+      var.cloudwatch.transaction_search.indexing_percentage == null || var.cloudwatch.application_signals.trace_indexing_rate == null
+    )
+    error_message = "Set the indexing rate in application_signals.trace_indexing_rate or transaction_search.indexing_percentage, not both."
+  }
+
+  validation {
+    condition = (
+      var.cloudwatch.transaction_search == null ? true :
+      !var.cloudwatch.transaction_search.import_existing || coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.enabled, var.cloudwatch.application_signals.ingest_otel_spans, var.cloudwatch.transaction_search != null)
+    )
+    error_message = "transaction_search.import_existing requires span ingestion to be on."
   }
 
   validation {
@@ -189,11 +210,10 @@ variable "cloudwatch" {
 
   validation {
     condition = (
-      var.cloudwatch.transaction_search == null ? true :
-      (var.cloudwatch.transaction_search.indexing_percentage >= 0 &&
-      var.cloudwatch.transaction_search.indexing_percentage <= 100)
+      coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage, var.cloudwatch.application_signals.trace_indexing_rate, 1) >= 0 &&
+      coalesce(var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.indexing_percentage, var.cloudwatch.application_signals.trace_indexing_rate, 1) <= 100
     )
-    error_message = "transaction_search.indexing_percentage must be between 0 and 100."
+    error_message = "The indexing rate (trace_indexing_rate or indexing_percentage) must be between 0 and 100."
   }
 
   validation {

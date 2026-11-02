@@ -62,7 +62,7 @@ failing safely.
 | Capability | Terraform ownership | Input |
 | --- | --- | --- |
 | Application Signals discovery (creates the `AWSServiceRoleForCloudWatchApplicationSignals` service-linked role) and grouping | `awscc_applicationsignals_discovery`, `awscc_applicationsignals_grouping_configuration` | `cloudwatch.application_signals` |
-| X-Ray Transaction Search, which also turns on Application Signals discovery | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.transaction_search` |
+| X-Ray Transaction Search (span ingestion and trace indexing rate), which also turns on Application Signals discovery | `awscc_xray_transaction_search_config`, preceded by `aws_cloudwatch_log_resource_policy` | `cloudwatch.application_signals.ingest_otel_spans` / `trace_indexing_rate`; advanced settings in `cloudwatch.transaction_search` |
 | X-Ray trace encryption, groups, sampling | `aws_xray_encryption_config`, `aws_xray_group`, `aws_xray_sampling_rule` | `cloudwatch.xray` |
 | Account telemetry inventory and tag enrichment | `aws_observabilityadmin_telemetry_evaluation`, `aws_observabilityadmin_telemetry_enrichment` | `cloudwatch.telemetry` |
 | CloudWatch Logs account policies | `aws_cloudwatch_log_account_policy` | `cloudwatch.log_account_policies` |
@@ -74,7 +74,7 @@ AWSCC owns Transaction Search indexing/destination. **Do not also manage**
 account/Region. X-Ray sampling is separate from indexing. The module creates
 the scoped Logs resource policy for `aws/spans` and
 `/aws/application-signals/data` before Transaction Search. The
-`indexing_percentage` input is **0–100 percent**, not a fraction. See
+indexing rate (`trace_indexing_rate` or `indexing_percentage`) is **0–100 percent**, not a fraction. See
 [AWS Transaction Search setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Transaction-Search-Cloudformation.html)
 and [the configuration reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-xray-transactionsearchconfig.html).
 
@@ -87,18 +87,31 @@ Application Map migration. See
 
 **Transaction Search and Application Signals**
 
-A `transaction_search` block enables Transaction Search (`enabled` defaults
-to `true`, `indexing_percentage` to `1`) and also turns on Application
-Signals discovery, so the service-linked role exists and Application Signals
-can use the spans. AWS starts discovery whenever it enables Transaction
-Search, so the module manages discovery whenever either
-`application_signals.enabled` or `transaction_search.enabled` is `true`, and
-creates discovery first. Set `transaction_search.enabled: false` to turn
-Transaction Search off while keeping its settings in `inputs.yaml`.
+The two Transaction Search settings on the CloudWatch Application Signals
+console page are inputs under `application_signals`:
+
+| Console setting | Input | AWS effect | Default |
+| --- | --- | --- | --- |
+| Ingest OpenTelemetry spans | `ingest_otel_spans` | X-Ray sends spans to the `aws/spans` log group as structured logs (Transaction Search) | Off, unless a `transaction_search` block is set |
+| Trace indexing rate | `trace_indexing_rate` | Percentage of ingested spans indexed as trace summaries, 0–100 | `1` (the included tier) |
+
+`cloudwatch.transaction_search` holds the advanced settings (`policy_name`,
+`spans_encryption`, `import_existing`). Its `enabled` and
+`indexing_percentage` are the same AWS settings as `ingest_otel_spans` and
+`trace_indexing_rate`, kept for v1.0.0 inputs: `enabled` must not disagree
+with `ingest_otel_spans`, and only one of the two rates may be set. A
+`transaction_search` block without either switch still enables ingestion,
+as in v1.0.0; with `ingest_otel_spans` set, the block follows it.
+
+Ingesting spans also turns on Application Signals discovery, so the
+service-linked role exists and Application Signals can use the spans. AWS
+starts discovery whenever it enables Transaction Search, so the module
+manages discovery whenever `application_signals.enabled` or span ingestion
+is on, and creates discovery first.
 
 | Turning off | Effect in AWS |
 | --- | --- |
-| `transaction_search` | X-Ray stops sending spans to CloudWatch Logs. `aws/spans` and its data remain. |
+| Span ingestion (`ingest_otel_spans: false`) | X-Ray stops sending spans to CloudWatch Logs. `aws/spans` and its data remain. |
 | Discovery (both flags `false`) | The resource leaves state. Application Signals has no operation that stops discovery, so the account stays enabled and the service-linked role remains. Re-enabling later needs `application_signals.import_existing: true`; once discovery has ever been on, that flag can stay set permanently. |
 
 **Adopting existing settings (`import_existing`)**
@@ -115,8 +128,8 @@ setting instead, and the module imports it by account ID on the next plan:
 | Application Signals discovery | `application_signals.import_existing: true` |
 | Transaction Search (discovery is almost always on too) | `transaction_search.import_existing: true` and `application_signals.import_existing: true` |
 
-- The plan shows `will be imported`. Once imported, the flag is a no-op and can stay set. Clear `transaction_search.import_existing` before setting `transaction_search.enabled: false`, because a later re-enable would otherwise try to import a disabled setting.
-- Set `indexing_percentage` to the account's current value (`aws xray get-indexing-rules`) before importing; otherwise the same apply also changes it. Read the update lines in the plan, not only `will be imported`.
+- The plan shows `will be imported`. Once imported, the flag is a no-op and can stay set. Clear `transaction_search.import_existing` before turning span ingestion off, because a later re-enable would otherwise try to import a disabled setting.
+- Set `trace_indexing_rate` to the account's current value (`aws xray get-indexing-rules`) before importing; otherwise the same apply also changes it. Read the update lines in the plan, not only `will be imported`.
 - Set both flags when Transaction Search is already on. With only `transaction_search.import_existing`, the discovery create fails as already existing and the Transaction Search import is not saved until both are set.
 - Set a flag only when the setting exists: importing a setting that is not enabled fails the plan with `Cannot import non-existent remote object`. Check with `aws xray get-trace-segment-destination` (`Destination: CloudWatchLogs` means Transaction Search is enabled) and `aws iam get-role --role-name AWSServiceRoleForCloudWatchApplicationSignals` (the role exists once discovery has been started).
 - An imported Transaction Search keeps its current `aws/spans` encryption; `spans_encryption` and the module key apply only when this state first enables it.
@@ -297,17 +310,19 @@ will own; the nested lines are illustrative comments, not a second key.
 ```yaml
 #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
 #   application_signals: # (Optional) Discovery/grouping settings; default {}.
-#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while transaction_search is enabled.
+#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while spans are ingested.
+#     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": send X-Ray spans to the aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set).
+#     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percent of ingested spans indexed, 0-100; default null (1, the included tier); exclusive with transaction_search.indexing_percentage.
 #     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
 #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
 #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
 #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
 #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
-#   transaction_search: # (Optional) X-Ray Transaction Search; also turns on Application Signals discovery; default null (disabled); use {} for all defaults (an empty key is null).
-#     enabled: true # (Optional) Default true when this block is set.
-#     indexing_percentage: 1 # (Optional) Percent of spans indexed, 0-100; default 1 (the included indexing tier).
+#   transaction_search: # (Optional) Advanced Transaction Search settings; the block alone also enables span ingestion (v1.0.0 behaviour); default null; use {} for all defaults (an empty key is null).
+#     enabled: true # (Optional) Same switch as application_signals.ingest_otel_spans (must not disagree); default null (follows ingest_otel_spans, otherwise true).
+#     indexing_percentage: 1 # (Optional) Same setting as application_signals.trace_indexing_rate (set only one), 0-100; default null (1).
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
-#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before enabled: false; match indexing_percentage to the current value.
+#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before turning ingestion off; match the indexing rate to the current value.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
 #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
 #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
@@ -407,18 +422,19 @@ inputs = {
 
 ### Application Signals and Transaction Search
 
-Put this in `inputs.yaml` to enable Transaction Search with 1% indexing,
-which also turns on discovery, and to set account grouping.
+Put this in `inputs.yaml` to enable Application Signals with span
+ingestion and 1% trace indexing, and to set account grouping.
 
 ```yaml
 cloudwatch:
   application_signals:
+    enabled: true
+    ingest_otel_spans: true
+    trace_indexing_rate: 1
     grouping_attributes:
       - grouping_name: Environment
         grouping_source_keys: [deployment.environment]
         default_grouping_value: unknown
-  transaction_search:
-    indexing_percentage: 1
 ```
 
 ### Adopting settings enabled from the console
@@ -430,9 +446,11 @@ first apply; they are no-ops once the settings are in state.
 ```yaml
 cloudwatch:
   application_signals:
+    enabled: true
     import_existing: true
+    ingest_otel_spans: true
+    trace_indexing_rate: 5   # the account's current rate
   transaction_search:
-    indexing_percentage: 5
     import_existing: true
 ```
 
@@ -468,8 +486,8 @@ enablement) the Transaction Search `aws/spans` log group with the module key.
 cloudwatch:
   encryption:
     enabled: true
-  transaction_search:
-    indexing_percentage: 1
+  application_signals:
+    ingest_otel_spans: true
   log_groups:
     /app/checkout:
       retention_in_days: 90
@@ -571,7 +589,7 @@ Available targets:
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
-| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | (Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled         = optional(bool, false)<br/>      import_existing = optional(bool, false)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      enabled             = optional(bool, true)<br/>      indexing_percentage = optional(number, 1)<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      import_existing     = optional(bool, false)<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
+| <a name="input_cloudwatch"></a> [cloudwatch](#input\_cloudwatch) | (Optional) Account/Region CloudWatch, Application Signals, X-Ray, Observability Admin, log group, and KMS encryption settings. Everything is disabled unless explicitly configured. Default: {}. | <pre>object({<br/>    application_signals = optional(object({<br/>      enabled             = optional(bool, false)<br/>      import_existing     = optional(bool, false)<br/>      ingest_otel_spans   = optional(bool)<br/>      trace_indexing_rate = optional(number)<br/>      grouping_attributes = optional(list(object({<br/>        grouping_name          = string<br/>        grouping_source_keys   = list(string)<br/>        default_grouping_value = optional(string)<br/>      })), [])<br/>    }), {})<br/>    transaction_search = optional(object({<br/>      enabled             = optional(bool)<br/>      indexing_percentage = optional(number)<br/>      policy_name         = optional(string, "CloudWatchTransactionSearch")<br/>      import_existing     = optional(bool, false)<br/>      spans_encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>    }))<br/>    xray = optional(object({<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      groups = optional(map(object({<br/>        filter_expression     = string<br/>        insights_enabled      = optional(bool, false)<br/>        notifications_enabled = optional(bool, false)<br/>      })), {})<br/>      sampling_rules = optional(map(object({<br/>        fixed_rate     = number<br/>        priority       = number<br/>        reservoir_size = number<br/>        host           = optional(string, "*")<br/>        http_method    = optional(string, "*")<br/>        resource_arn   = optional(string, "*")<br/>        service_name   = optional(string, "*")<br/>        service_type   = optional(string, "*")<br/>        url_path       = optional(string, "*")<br/>        attributes     = optional(map(string), {})<br/>      })), {})<br/>    }), {})<br/>    telemetry = optional(object({<br/>      evaluation = optional(object({<br/>        all_regions = optional(bool)<br/>        regions     = optional(set(string))<br/>      }))<br/>      enrichment = optional(bool, false)<br/>    }), {})<br/>    log_account_policies = optional(map(object({<br/>      policy_document    = string<br/>      policy_type        = string<br/>      scope              = optional(string, "ALL")<br/>      selection_criteria = optional(string)<br/>    })), {})<br/>    log_groups = optional(map(object({<br/>      retention_in_days           = optional(number)<br/>      log_group_class             = optional(string, "STANDARD")<br/>      deletion_protection_enabled = optional(bool)<br/>      skip_destroy                = optional(bool, false)<br/>      encryption = optional(object({<br/>        type   = string<br/>        key_id = optional(string)<br/>      }))<br/>      tags = optional(map(string), {})<br/>    })), {})<br/>    encryption = optional(object({<br/>      enabled                 = optional(bool, false)<br/>      alias_name              = optional(string)<br/>      deletion_window_in_days = optional(number, 30)<br/>      rotation_period_in_days = optional(number, 365)<br/>      iam_policy = optional(object({<br/>        name = optional(string)<br/>        path = optional(string, "/")<br/>      }), {})<br/>    }), {})<br/>  })</pre> | `{}` | no |
 | <a name="input_extra_tags"></a> [extra\_tags](#input\_extra\_tags) | Extra tags to add to the resources | `map(string)` | `{}` | no |
 | <a name="input_is_hub"></a> [is\_hub](#input\_is\_hub) | Is this a hub or spoke configuration? | `bool` | `false` | no |
 | <a name="input_org"></a> [org](#input\_org) | Organization details | <pre>object({<br/>    organization_name = string<br/>    organization_unit = string<br/>    environment_type  = string<br/>    environment_name  = string<br/>  })</pre> | n/a | yes |

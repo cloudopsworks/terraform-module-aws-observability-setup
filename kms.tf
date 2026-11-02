@@ -15,15 +15,16 @@ locals {
 
   # Decided from configuration rather than the key ARN so the plan shape stays
   # known before the key exists.
+  transaction_search_spans_override = var.cloudwatch.transaction_search == null ? null : var.cloudwatch.transaction_search.spans_encryption
   transaction_search_spans_encrypted = (
     !local.transaction_search_enabled ? false :
-    var.cloudwatch.transaction_search.spans_encryption == null ? local.encryption_enabled :
-    var.cloudwatch.transaction_search.spans_encryption.type == "KMS"
+    local.transaction_search_spans_override == null ? local.encryption_enabled :
+    local.transaction_search_spans_override.type == "KMS"
   )
   transaction_search_spans_key_arn = (
     !local.transaction_search_spans_encrypted ? null :
-    var.cloudwatch.transaction_search.spans_encryption == null ? local.encryption_key_arn :
-    var.cloudwatch.transaction_search.spans_encryption.key_id
+    local.transaction_search_spans_override == null ? local.encryption_key_arn :
+    local.transaction_search_spans_override.key_id
   )
 
   # IAM policy names are account-wide, but the boilerplate Region code is not

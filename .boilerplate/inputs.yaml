@@ -2,17 +2,19 @@
 # Optional CloudWatch account/Region settings (all disabled when omitted).
 #cloudwatch: {} # (Optional) Account/Region settings; default {} manages nothing.
 #   application_signals: # (Optional) Discovery/grouping settings; default {}.
-#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while transaction_search is enabled.
+#     enabled: true # (Optional) Enable discovery, which creates the Application Signals service-linked role; default false; forced on while spans are ingested.
+#     ingest_otel_spans: true # (Optional) Console "Ingest OpenTelemetry spans": send X-Ray spans to the aws/spans log group (Transaction Search); default null (off unless a transaction_search block is set).
+#     trace_indexing_rate: 1 # (Optional) Console "Trace indexing rate": percent of ingested spans indexed, 0-100; default null (1, the included tier); exclusive with transaction_search.indexing_percentage.
 #     import_existing: false # (Optional) Import discovery already enabled in this account instead of creating it; default false; fails if it does not exist; can stay set (discovery cannot be stopped).
 #     grouping_attributes: # (Optional) Whole-account grouping configuration; default [].
 #       - grouping_name: "Environment" # (Required) Name, 1-128 characters.
 #         grouping_source_keys: ["deployment.environment"] # (Required) Nonempty list.
 #         default_grouping_value: "unknown" # (Optional) Fallback, 1-128 characters; default null.
-#   transaction_search: # (Optional) X-Ray Transaction Search; also turns on Application Signals discovery; default null (disabled); use {} for all defaults (an empty key is null).
-#     enabled: true # (Optional) Default true when this block is set.
-#     indexing_percentage: 1 # (Optional) Percent of spans indexed, 0-100; default 1 (the included indexing tier).
+#   transaction_search: # (Optional) Advanced Transaction Search settings; the block alone also enables span ingestion (v1.0.0 behaviour); default null; use {} for all defaults (an empty key is null).
+#     enabled: true # (Optional) Same switch as application_signals.ingest_otel_spans (must not disagree); default null (follows ingest_otel_spans, otherwise true).
+#     indexing_percentage: 1 # (Optional) Same setting as application_signals.trace_indexing_rate (set only one), 0-100; default null (1).
 #     policy_name: "CloudWatchTransactionSearch" # (Optional) Default shown.
-#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before enabled: false; match indexing_percentage to the current value.
+#     import_existing: false # (Optional) Import Transaction Search already enabled in this account instead of creating it; default false; fails if it is not enabled; clear before turning ingestion off; match the indexing rate to the current value.
 #     spans_encryption: # (Optional) aws/spans key override, applied only when Transaction Search is first enabled; default null (module key when encryption.enabled).
 #       type: "KMS" # (Required) NONE (no key at creation) or KMS.
 #       key_id: "arn:aws:kms:region:account:key/key-id" # (Optional) Key ARN in this account and Region, not an ID or alias; required for KMS.
