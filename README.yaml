@@ -197,7 +197,7 @@ introduction: |-
 
   **Prerequisites and limits**
 
-  - Terraform or OpenTofu `>= 1.7` (for conditional `import` blocks), AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Configure both providers for the same account and Region in the caller; do not let AWSCC silently fall back to different ambient credentials.
+  - Terraform or OpenTofu `>= 1.7` (for conditional `import` blocks), AWS provider `>= 6.69.0, < 7.0.0`, AWSCC provider `>= 1.108.0, < 2.0.0` (the first AWSCC release with the `aws/spans` key setting). Deployments whose lock file pins an older AWSCC must run `terragrunt init -upgrade`. Both providers must target the same account and Region: the scaffolded `terragrunt.hcl` generates the `awscc` provider from the root `region` and `sts_role_arn` locals (see **Usage**); do not let AWSCC fall back to different ambient credentials.
   - Grant the caller the relevant CloudWatch Logs, X-Ray, Application Signals, Observability Admin, and Cloud Control API permissions for enabled settings. Discovery and Transaction Search create the Application Signals service-linked role, so the caller needs `iam:CreateServiceLinkedRole` and `application-signals:StartDiscovery`.
   - **Upgrading from v1.0.0:** the module now needs Terraform or OpenTofu `>= 1.7` and must be the root module (as under Terragrunt). With `transaction_search` set and `application_signals.enabled: false`: the next plan adds discovery, which AWS already enabled with Transaction Search. Set `application_signals.import_existing: true` for that apply so discovery is imported instead of failing to create.
   - Do not enable account `telemetry.evaluation` where AWS Organizations already manages telemetry evaluation. Creation may succeed while destruction is rejected. Organization-level setup is outside this module. See [the AWS provider warning](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/observabilityadmin_telemetry_evaluation) and [AWS organization setup](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/telemetry-config-turn-on.html).
@@ -221,47 +221,33 @@ usage: |-
   cd dev/us-east-1/shared/cloudwatch-observability
   terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-observability-setup
   vi inputs.yaml
-  # Ensure the parent root.hcl configures both providers as shown below.
   terragrunt plan
   terragrunt apply
   ```
 
   Scaffold resolves the latest release tag into a pinned `terraform.source`.
   Use a release (or tested pre-release) tag that contains these scaffold fixes;
-  older published tags may still contain the prior template errors. Before
-  applying, configure both providers in the parent Terragrunt `root.hcl` with
-  the same Region, source profile, and target role. For example, set
-  `AWS_REGION`, `AWS_PROFILE`, and `OBSERVABILITY_ROLE_ARN` and use:
+  older published tags may still contain the prior template errors.
 
-  ```hcl
-  generate "observability_providers" {
-    path      = "observability-providers.tf"
-    if_exists = "overwrite_terragrunt"
-    contents  = <<-EOF
-  provider "aws" {
-    region  = "${get_env("AWS_REGION")}"
-    profile = "${get_env("AWS_PROFILE")}"
-    assume_role {
-      role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
-    }
-  }
+  **Providers.** The parent `root.hcl` from the CloudOps Works Terragrunt
+  project template generates only the `aws` provider (`provider.g.tf`). The
+  scaffolded `terragrunt.hcl` includes that root with `expose = true` and
+  generates the matching `awscc` provider (`provider-awscc.g.tf`) from the
+  root's `region` and `sts_role_arn` locals, so both providers act on the
+  same account and Region. The root must define those two locals, as the
+  template's `root.hcl` does. Without a matching `awscc` provider, AWSCC uses
+  its own default credential chain, which shows up as `Cannot import
+  non-existent remote object` on import or as a create that fails with
+  `AlreadyExists`.
 
-  provider "awscc" {
-    region  = "${get_env("AWS_REGION")}"
-    profile = "${get_env("AWS_PROFILE")}"
-    assume_role = {
-      role_arn = "${get_env("OBSERVABILITY_ROLE_ARN")}"
-    }
-  }
-  EOF
-  }
-  ```
-
-  The AWS provider uses an `assume_role` block; AWSCC uses an
-  `assume_role` object. See the [AWS provider](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/index.html.markdown)
-  and [AWSCC provider](https://github.com/hashicorp/terraform-provider-awscc/blob/v1.108.0/docs/index.md)
-  configuration references. If your root stack already generates providers,
-  add AWSCC to that generator instead of creating a second provider file.
+  - AWSCC takes `assume_role` as an object (`assume_role = { ... }`), not a
+    block as in the AWS provider; copying the `aws` block verbatim fails to parse.
+  - If the root assumes the role itself (`iam_role`, the template's
+    assume-role-on-root option), remove `assume_role` from the generated
+    `awscc` block, as the root `aws` provider has none either.
+  - See the [AWS provider](https://github.com/hashicorp/terraform-provider-aws/blob/v6.71.0/website/docs/index.html.markdown)
+    and [AWSCC provider](https://github.com/hashicorp/terraform-provider-awscc/blob/v1.108.0/docs/index.md)
+    configuration references.
 
   The Terragrunt hierarchy must provide `root.hcl`, `env-inputs.yaml`,
   `global-inputs.yaml`, and `global-tags.json` in parent directories. The
@@ -364,7 +350,22 @@ usage: |-
   }
 
   include "root" {
-    path = find_in_parent_folders("root.hcl")
+    path   = find_in_parent_folders("root.hcl")
+    expose = true
+  }
+
+  generate "provider_awscc" {
+    path      = "provider-awscc.g.tf"
+    if_exists = "overwrite_terragrunt"
+    contents  = <<EOF
+  provider "awscc" {
+    region = "${include.root.locals.region}"
+    assume_role = {
+      role_arn     = "${include.root.locals.sts_role_arn}"
+      session_name = "terragrunt"
+    }
+  }
+  EOF
   }
 
   terraform {
@@ -488,7 +489,7 @@ examples: |-
   ```
 
 quickstart: |-
-  1. Configure AWS credentials and matching `aws` and `awscc` providers in the calling root stack, as shown in **Usage**.
+  1. Configure AWS credentials and a parent `root.hcl` that generates the `aws` provider and defines the `region` and `sts_role_arn` locals; the scaffolded `terragrunt.hcl` generates the matching `awscc` provider (see **Usage**).
   2. Scaffold a deployment as shown in **Usage**; inspect `inputs.yaml` and `terragrunt.hcl`.
   3. Leave `#cloudwatch: {}` commented for a no-op start; then uncomment it and enable one setting at a time. For discovery or Transaction Search already enabled in the account, set that setting's `import_existing: true`.
   4. To encrypt, set `encryption.enabled: true` and attach the `encryption_policy_arn` output to every role that writes to or reads from encrypted log groups.
