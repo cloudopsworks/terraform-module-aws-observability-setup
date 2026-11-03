@@ -22,6 +22,7 @@ locals {
 
 include "root" {
   path = find_in_parent_folders("{{ .RootFileName }}")
+  inherit = true
 }
 
 # The module also uses the awscc provider (Application Signals discovery and X-Ray Transaction Search), which the
